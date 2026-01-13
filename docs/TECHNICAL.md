@@ -76,6 +76,7 @@ Content script monitors job sites → Detects apply clicks + form state
 
 - **@riruru/automation-core** — LLM-powered browser automation
 - **React** — Popup UI
+- **TanStack Query** — Data fetching & caching
 - **Zustand** — State management
 - **Vite** — Build tooling
 
