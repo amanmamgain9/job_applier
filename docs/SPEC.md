@@ -327,4 +327,4 @@ We save the application URL regardless—user can return to it.
 
 ---
 
-> 📖 **See also:** [PRINCIPLES.md](./PRINCIPLES.md) · [TECHNICAL.md](./TECHNICAL.md)
+> 📖 **See also:** [TECHNICAL.md](./TECHNICAL.md)
