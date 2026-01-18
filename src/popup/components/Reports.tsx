@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { FileText, ChevronRight, Clock, CheckCircle, XCircle, Zap, MessageSquare, MousePointer, ArrowLeft, Download } from 'lucide-react';
-import type { SessionReport, StepLog, ActionLog } from '@/services/automation/types';
+import type { SessionReport, StepLog, ActionLog } from '@/background/discovery';
 import { createMessage } from '@shared/types/messages';
 
 function formatDuration(ms: number): string {

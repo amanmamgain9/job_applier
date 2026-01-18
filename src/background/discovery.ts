@@ -1,22 +1,109 @@
+/// <reference types="vite/client" />
 /**
- * Job Discovery Service
+ * Job Discovery
  * 
- * Uses automation agent to search LinkedIn and extract jobs.
+ * Everything about finding jobs on LinkedIn:
+ * - Building search queries from preferences
+ * - Creating LLM task prompts
+ * - Parsing job results
+ * - Session tracking and reporting
+ * - Agent lifecycle management
  */
 
-import { initAgent, executeTask, stopAgent, cleanupAgent, onDiscoveryEvent } from './agent';
-import type { 
-  DiscoveryOptions, 
-  DiscoveryResult, 
-  DiscoveryState, 
-  DiscoveryEvent, 
-  SessionReport,
-  StepLog,
-  ActionLog,
-} from './types';
 import type { Job } from '@shared/types/job';
 import type { ExtractedPreferences } from '@/components/onboarding/types';
+import { AutomationAgent, BrowserContext } from '@/lib/automation-core';
+import type { TaskResult, ExecutionEvent, LLMConfig, LLMProvider } from '@/lib/automation-core';
 
+// ============================================================================
+// Types
+// ============================================================================
+
+export type DiscoveryStatus = 'idle' | 'running' | 'paused' | 'error' | 'captcha' | 'login_required';
+
+export interface DiscoveryState {
+  status: DiscoveryStatus;
+  jobsFound: number;
+  currentStep: number;
+  maxSteps: number;
+  error?: string;
+  startedAt?: number;
+}
+
+export interface DiscoveryOptions {
+  maxJobs: number;
+  preferences: ExtractedPreferences;
+  searchQuery?: string;
+}
+
+export interface DiscoveryResult {
+  success: boolean;
+  jobs: Job[];
+  error?: string;
+  stoppedReason?: 'complete' | 'max_jobs' | 'user_stopped' | 'error' | 'captcha' | 'login';
+  report?: SessionReport;
+}
+
+export interface ActionLog {
+  timestamp: number;
+  action: string;
+  details: string;
+  status: 'start' | 'ok' | 'fail';
+  error?: string;
+}
+
+export interface StepLog {
+  step: number;
+  timestamp: number;
+  goal: string;
+  actions: ActionLog[];
+  url?: string;
+  success: boolean;
+  error?: string;
+}
+
+export interface SessionReport {
+  id: string;
+  startedAt: number;
+  endedAt: number;
+  duration: number;
+  task: string;
+  searchQuery: string;
+  success: boolean;
+  stoppedReason: string;
+  error?: string;
+  totalSteps: number;
+  successfulSteps: number;
+  failedSteps: number;
+  totalActions: number;
+  successfulActions: number;
+  failedActions: number;
+  jobsFound: number;
+  jobsExtracted: Job[];
+  steps: StepLog[];
+  urlsVisited: string[];
+  finalUrl?: string;
+}
+
+// Parsed job data from LLM response
+interface ParsedJobData {
+  title?: string;
+  company?: string;
+  location?: string;
+  salary?: string;
+  jobType?: string;
+  experienceLevel?: string;
+  description?: string;
+  postedTime?: string;
+  easyApply?: boolean;
+  linkedinJobId?: string;
+}
+
+// ============================================================================
+// State
+// ============================================================================
+
+// Discovery state
 let discoveryState: DiscoveryState = {
   status: 'idle',
   jobsFound: 0,
@@ -27,24 +114,120 @@ let discoveryState: DiscoveryState = {
 const stateListeners: Set<(state: DiscoveryState) => void> = new Set();
 const jobListeners: Set<(job: Job) => void> = new Set();
 
-// Session reporting state - now with live report that updates in real-time
+// Agent state
+let agent: AutomationAgent | null = null;
+let browserContext: BrowserContext | null = null;
+
+// Session reporting state
 let currentReport: SessionReport | null = null;
 let currentStepLog: StepLog | null = null;
 let urlsVisited: Set<string> = new Set();
 const sessionReports: SessionReport[] = [];
 
-/**
- * Build search query from preferences
- */
+// ============================================================================
+// LLM Configuration
+// ============================================================================
+
+function getLLMConfig(): LLMConfig {
+  const provider = (import.meta.env.VITE_LLM_PROVIDER as LLMProvider) || 'anthropic';
+  const apiKey = import.meta.env.VITE_LLM_API_KEY || import.meta.env.VITE_ANTHROPIC_API_KEY || '';
+  const model = import.meta.env.VITE_LLM_MODEL || 'claude-sonnet-4-20250514';
+  const baseUrl = import.meta.env.VITE_LLM_BASE_URL;
+
+  if (!apiKey) {
+    throw new Error('LLM API key not configured. Set VITE_LLM_API_KEY or VITE_ANTHROPIC_API_KEY in .env');
+  }
+
+  return {
+    provider,
+    apiKey,
+    model,
+    ...(baseUrl && { baseUrl }),
+    temperature: 0.1,
+  };
+}
+
+export function hasLLMConfig(): boolean {
+  try {
+    getLLMConfig();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// ============================================================================
+// Agent Lifecycle
+// ============================================================================
+
+async function initAgent(): Promise<void> {
+  console.log('[Agent] Initializing...');
+  await cleanupAgent();
+
+  const llmConfig = getLLMConfig();
+  console.log('[Agent] LLM:', llmConfig.provider, llmConfig.model);
+
+  // Create new tab for automation
+  const newTab = await chrome.tabs.create({ 
+    url: 'about:blank',
+    active: true
+  });
+  
+  if (!newTab.id) {
+    throw new Error('Failed to create new tab');
+  }
+  
+  console.log('[Agent] New tab created:', newTab.id);
+  browserContext = await BrowserContext.fromTab(newTab.id);
+
+  agent = new AutomationAgent({
+    context: browserContext,
+    llm: llmConfig,
+    options: {
+      maxSteps: 50,
+      maxActionsPerStep: 5,
+      maxFailures: 3,
+      useVision: false,
+    },
+  });
+  console.log('[Agent] Ready');
+}
+
+async function executeTask(task: string): Promise<TaskResult> {
+  if (!agent) {
+    throw new Error('Agent not initialized');
+  }
+  return agent.execute(task);
+}
+
+async function stopAgent(): Promise<void> {
+  if (agent) {
+    await agent.stop();
+  }
+}
+
+async function cleanupAgent(): Promise<void> {
+  if (agent) {
+    await agent.cleanup();
+    agent = null;
+  }
+  if (browserContext) {
+    await browserContext.cleanup();
+    browserContext = null;
+  }
+}
+
+// ============================================================================
+// Search Query Building
+// ============================================================================
+
 function buildSearchQuery(preferences: ExtractedPreferences): string {
   const parts: string[] = [];
 
-  // Roles
   if (preferences.roles?.length) {
     parts.push(preferences.roles.slice(0, 3).join(' OR '));
   }
 
-  // Location
   if (preferences.locations?.length) {
     const remote = preferences.locations.find((l) => l.type === 'remote');
     if (remote) {
@@ -63,9 +246,10 @@ function buildSearchQuery(preferences: ExtractedPreferences): string {
   return parts.join(' ') || 'software engineer';
 }
 
-/**
- * Build the discovery task prompt
- */
+// ============================================================================
+// Task Prompt Building
+// ============================================================================
+
 function buildDiscoveryTask(searchQuery: string, maxJobs: number): string {
   const linkedinUrl = `https://www.linkedin.com/jobs/search/?keywords=${encodeURIComponent(searchQuery)}`;
   
@@ -138,25 +322,18 @@ done(success=true, text="[...array of job objects as JSON...]")
 `.trim();
 }
 
-/**
- * Parse jobs from task result
- */
-function parseJobsFromResult(finalAnswer: string | undefined): Partial<Job>[] {
-  if (!finalAnswer) {
-    console.log('[Discovery] No final answer to parse');
-    return [];
-  }
+// ============================================================================
+// Result Parsing
+// ============================================================================
 
-  console.log('[Discovery] Parsing jobs from:', finalAnswer.substring(0, 500));
+function parseJobsFromResult(finalAnswer: string | undefined): ParsedJobData[] {
+  if (!finalAnswer) return [];
 
   try {
-    // Try to find JSON array in the response - use greedy match for nested objects
     const jsonMatch = finalAnswer.match(/\[[\s\S]*\]/);
     if (jsonMatch) {
-      console.log('[Discovery] Found JSON array, length:', jsonMatch[0].length);
       const parsed = JSON.parse(jsonMatch[0]);
       if (Array.isArray(parsed)) {
-        console.log('[Discovery] Parsed', parsed.length, 'jobs');
         return parsed.map((item) => ({
           title: item.title || 'Unknown Title',
           company: item.company || 'Unknown Company',
@@ -170,60 +347,37 @@ function parseJobsFromResult(finalAnswer: string | undefined): Partial<Job>[] {
           linkedinJobId: String(item.linkedinJobId || item.jobId || ''),
         }));
       }
-    } else {
-      console.log('[Discovery] No JSON array found in response');
     }
   } catch (err) {
-    console.error('[Discovery] Failed to parse jobs from result:', err);
-    console.error('[Discovery] Raw answer was:', finalAnswer);
+    console.error('[Discovery] Failed to parse jobs:', err);
   }
 
   return [];
 }
 
-/**
- * Convert partial job to full Job object
- */
-function createJob(partial: Partial<Job> & { salary?: string; postedTime?: string }): Job {
+function createJob(partial: ParsedJobData): Job {
   const now = new Date().toISOString();
   const linkedinJobId = partial.linkedinJobId || crypto.randomUUID();
 
-  // Parse location type
   const locationLower = (partial.location || '').toLowerCase();
   let locationType: 'remote' | 'hybrid' | 'onsite' = 'onsite';
-  if (locationLower.includes('remote')) {
-    locationType = 'remote';
-  } else if (locationLower.includes('hybrid')) {
-    locationType = 'hybrid';
-  }
+  if (locationLower.includes('remote')) locationType = 'remote';
+  else if (locationLower.includes('hybrid')) locationType = 'hybrid';
 
-  // Parse job type
   const jobTypeLower = (partial.jobType || '').toLowerCase();
   let jobType: 'full-time' | 'part-time' | 'contract' | 'internship' = 'full-time';
-  if (jobTypeLower.includes('part')) {
-    jobType = 'part-time';
-  } else if (jobTypeLower.includes('contract')) {
-    jobType = 'contract';
-  } else if (jobTypeLower.includes('intern')) {
-    jobType = 'internship';
-  }
+  if (jobTypeLower.includes('part')) jobType = 'part-time';
+  else if (jobTypeLower.includes('contract')) jobType = 'contract';
+  else if (jobTypeLower.includes('intern')) jobType = 'internship';
 
-  // Parse experience level
   const expLower = (partial.experienceLevel || '').toLowerCase();
   let experienceLevel: 'internship' | 'entry' | 'associate' | 'mid-senior' | 'director' | 'executive' | undefined;
-  if (expLower.includes('intern')) {
-    experienceLevel = 'internship';
-  } else if (expLower.includes('entry')) {
-    experienceLevel = 'entry';
-  } else if (expLower.includes('associate')) {
-    experienceLevel = 'associate';
-  } else if (expLower.includes('mid') || expLower.includes('senior')) {
-    experienceLevel = 'mid-senior';
-  } else if (expLower.includes('director')) {
-    experienceLevel = 'director';
-  } else if (expLower.includes('executive')) {
-    experienceLevel = 'executive';
-  }
+  if (expLower.includes('intern')) experienceLevel = 'internship';
+  else if (expLower.includes('entry')) experienceLevel = 'entry';
+  else if (expLower.includes('associate')) experienceLevel = 'associate';
+  else if (expLower.includes('mid') || expLower.includes('senior')) experienceLevel = 'mid-senior';
+  else if (expLower.includes('director')) experienceLevel = 'director';
+  else if (expLower.includes('executive')) experienceLevel = 'executive';
 
   return {
     id: crypto.randomUUID(),
@@ -234,7 +388,7 @@ function createJob(partial: Partial<Job> & { salary?: string; postedTime?: strin
     locationType,
     jobType,
     experienceLevel,
-    salaryText: typeof partial.salary === 'string' ? partial.salary : undefined,
+    salaryText: partial.salary || undefined,
     description: partial.description,
     postedAt: now,
     postedTime: partial.postedTime,
@@ -245,9 +399,10 @@ function createJob(partial: Partial<Job> & { salary?: string; postedTime?: strin
   };
 }
 
-/**
- * Update discovery state and notify listeners
- */
+// ============================================================================
+// State Management
+// ============================================================================
+
 function updateState(updates: Partial<DiscoveryState>): void {
   discoveryState = { ...discoveryState, ...updates };
   stateListeners.forEach((listener) => {
@@ -259,11 +414,7 @@ function updateState(updates: Partial<DiscoveryState>): void {
   });
 }
 
-/**
- * Notify job listeners of a new job and update live report
- */
 function notifyJobFound(job: Job): void {
-  // Update live report with new job
   if (currentReport) {
     currentReport.jobsFound++;
     currentReport.jobsExtracted.push(job);
@@ -280,18 +431,15 @@ function notifyJobFound(job: Job): void {
   });
 }
 
-/**
- * Initialize a new session for reporting - creates live report immediately
- */
+// ============================================================================
+// Session Reporting
+// ============================================================================
+
 function initSession(task: string, searchQuery: string): void {
-  const sessionId = crypto.randomUUID();
-  const now = Date.now();
-  
-  // Create live report immediately - this will be updated in real-time
   currentReport = {
-    id: sessionId,
-    startedAt: now,
-    endedAt: now,
+    id: crypto.randomUUID(),
+    startedAt: Date.now(),
+    endedAt: Date.now(),
     duration: 0,
     task,
     searchQuery,
@@ -311,30 +459,20 @@ function initSession(task: string, searchQuery: string): void {
   
   currentStepLog = null;
   urlsVisited = new Set();
-  
-  // Add to reports array immediately so it's visible right away
   sessionReports.push(currentReport);
-  
-  console.log(`[Session ${sessionId}] Started - live report created`);
 }
 
-/**
- * Log an action within the current step - updates live report
- */
 function logAction(action: string, status: 'start' | 'ok' | 'fail', details: string, error?: string): void {
   if (!currentStepLog || !currentReport) return;
   
-  const actionLog: ActionLog = {
+  currentStepLog.actions.push({
     timestamp: Date.now(),
     action,
     details,
     status,
     ...(error && { error }),
-  };
+  });
   
-  currentStepLog.actions.push(actionLog);
-  
-  // Update live report stats
   if (status === 'ok') {
     currentReport.totalActions++;
     currentReport.successfulActions++;
@@ -343,28 +481,18 @@ function logAction(action: string, status: 'start' | 'ok' | 'fail', details: str
     currentReport.failedActions++;
   }
   
-  // Update timestamp
   currentReport.endedAt = Date.now();
   currentReport.duration = currentReport.endedAt - currentReport.startedAt;
-  
-  console.log(`[Session] Step ${currentStepLog.step} - ${action}: ${status} - ${details}`);
 }
 
-/**
- * Start a new step in the session - updates live report
- */
 function startStep(stepNumber: number, goal?: string, url?: string): void {
   if (!currentReport) return;
   
-  // Finalize previous step if exists and add to report
   if (currentStepLog) {
     currentReport.steps.push(currentStepLog);
     currentReport.totalSteps++;
-    if (currentStepLog.success) {
-      currentReport.successfulSteps++;
-    } else {
-      currentReport.failedSteps++;
-    }
+    if (currentStepLog.success) currentReport.successfulSteps++;
+    else currentReport.failedSteps++;
   }
   
   currentStepLog = {
@@ -381,16 +509,10 @@ function startStep(stepNumber: number, goal?: string, url?: string): void {
     currentReport.urlsVisited = Array.from(urlsVisited);
   }
   
-  // Update timestamp
   currentReport.endedAt = Date.now();
   currentReport.duration = currentReport.endedAt - currentReport.startedAt;
-  
-  console.log(`[Session] Step ${stepNumber} started${goal ? `: ${goal}` : ''}`);
 }
 
-/**
- * Mark current step as failed
- */
 function failStep(error: string): void {
   if (currentStepLog) {
     currentStepLog.success = false;
@@ -398,9 +520,6 @@ function failStep(error: string): void {
   }
 }
 
-/**
- * Finalize the live session report with final status
- */
 function finalizeSessionReport(
   success: boolean,
   stoppedReason: string,
@@ -409,8 +528,6 @@ function finalizeSessionReport(
   finalUrl?: string
 ): SessionReport {
   if (!currentReport) {
-    // Shouldn't happen, but create a minimal report if it does
-    console.error('[Session] No current report to finalize!');
     return {
       id: crypto.randomUUID(),
       startedAt: Date.now(),
@@ -434,110 +551,112 @@ function finalizeSessionReport(
     };
   }
   
-  // Finalize current step if exists
   if (currentStepLog) {
     currentReport.steps.push(currentStepLog);
     currentReport.totalSteps++;
-    if (currentStepLog.success) {
-      currentReport.successfulSteps++;
-    } else {
-      currentReport.failedSteps++;
-    }
+    if (currentStepLog.success) currentReport.successfulSteps++;
+    else currentReport.failedSteps++;
     currentStepLog = null;
   }
   
-  // Update final status
-  const endedAt = Date.now();
-  currentReport.endedAt = endedAt;
-  currentReport.duration = endedAt - currentReport.startedAt;
+  currentReport.endedAt = Date.now();
+  currentReport.duration = currentReport.endedAt - currentReport.startedAt;
   currentReport.success = success;
   currentReport.stoppedReason = stoppedReason;
-  if (error) {
-    currentReport.error = error;
-  }
-  if (finalUrl) {
-    currentReport.finalUrl = finalUrl;
-  }
+  if (error) currentReport.error = error;
+  if (finalUrl) currentReport.finalUrl = finalUrl;
   currentReport.jobsFound = jobs.length;
   currentReport.jobsExtracted = jobs;
   currentReport.urlsVisited = Array.from(urlsVisited);
   
   const report = currentReport;
-  
-  // Clear current report reference (it's already in sessionReports array)
   currentReport = null;
   
-  // Log summary
-  console.log('\n========== SESSION REPORT FINALIZED ==========');
-  console.log(`Session ID: ${report.id}`);
-  console.log(`Duration: ${(report.duration / 1000).toFixed(1)}s`);
-  console.log(`Success: ${report.success}`);
-  console.log(`Stopped Reason: ${report.stoppedReason}`);
-  if (report.error) console.log(`Error: ${report.error}`);
-  console.log(`Steps: ${report.successfulSteps}/${report.totalSteps} successful`);
-  console.log(`Actions: ${report.successfulActions}/${report.totalActions} successful`);
-  console.log(`Jobs Found: ${report.jobsFound}`);
-  console.log(`URLs Visited: ${report.urlsVisited.length}`);
-  console.log('\n--- Step Details ---');
-  for (const step of report.steps) {
-    const stepStatus = step.success ? '✓' : '✗';
-    console.log(`  Step ${step.step} ${stepStatus}: ${step.goal || 'No goal'}`);
-    for (const action of step.actions) {
-      const actionIcon = action.status === 'ok' ? '  ✓' : action.status === 'fail' ? '  ✗' : '  ⟳';
-      console.log(`    ${actionIcon} ${action.action}: ${action.details.substring(0, 80)}`);
-    }
-    if (step.error) {
-      console.log(`      Error: ${step.error}`);
-    }
-  }
-  console.log('====================================\n');
+  console.log(`[Session] Finalized: ${success ? 'SUCCESS' : 'FAILED'} - ${jobs.length} jobs, ${report.totalSteps} steps`);
   
   return report;
 }
 
-/**
- * Get all session reports
- */
+// ============================================================================
+// Event Handling (from automation-core)
+// ============================================================================
+
+function handleExecutionEvent(event: ExecutionEvent): void {
+  const eventType = event.type;
+  
+  // Handle step events
+  if (eventType === 'step_start' || eventType === 'step_ok') {
+    const stepNum = event.step || 0;
+    startStep(stepNum, event.details);
+    updateState({
+      currentStep: stepNum,
+      maxSteps: event.maxSteps || 50,
+    });
+  } else if (eventType === 'step_fail') {
+    const stepNum = event.step || 0;
+    updateState({ currentStep: stepNum });
+    failStep(event.details || 'Step failed');
+  }
+  
+  // Handle action events
+  if (eventType === 'action_start') {
+    logAction(event.action || 'action', 'start', event.details || '');
+  } else if (eventType === 'action_ok') {
+    logAction(event.action || 'action', 'ok', event.details || '');
+  } else if (eventType === 'action_fail') {
+    logAction(event.action || 'action', 'fail', event.details || '', event.details);
+  }
+  
+  // Handle LLM events
+  if (eventType === 'llm_start') {
+    logAction('llm_call', 'start', event.details || '');
+  } else if (eventType === 'llm_ok') {
+    logAction('llm_call', 'ok', event.details || '');
+  } else if (eventType === 'llm_fail') {
+    logAction('llm_call', 'fail', event.details || '', event.details);
+  }
+  
+  // Handle task failure
+  if (eventType === 'task_fail') {
+    const errorMsg = event.details || 'Unknown error';
+    failStep(errorMsg);
+    
+    const errorLower = errorMsg.toLowerCase();
+    if (errorLower.includes('captcha')) {
+      updateState({ status: 'captcha', error: 'CAPTCHA detected' });
+    } else if (errorLower.includes('login')) {
+      updateState({ status: 'login_required', error: 'Login required' });
+    }
+  }
+}
+
+// ============================================================================
+// Public API
+// ============================================================================
+
 export function getSessionReports(): SessionReport[] {
   return [...sessionReports];
 }
 
-/**
- * Get the most recent session report
- */
 export function getLastSessionReport(): SessionReport | null {
   return sessionReports.length > 0 ? sessionReports[sessionReports.length - 1] : null;
 }
 
-/**
- * Clear all session reports
- */
 export function clearSessionReports(): void {
   sessionReports.length = 0;
 }
 
-/**
- * Start job discovery
- */
 export async function startDiscovery(options: DiscoveryOptions): Promise<DiscoveryResult> {
   const { maxJobs = 20, preferences, searchQuery } = options;
 
-  console.log('[Discovery] Starting discovery with options:', { maxJobs, searchQuery, preferences });
-
   if (discoveryState.status === 'running') {
-    console.log('[Discovery] Already running, aborting');
     return { success: false, jobs: [], error: 'Discovery already running' };
   }
 
   const query = searchQuery || buildSearchQuery(preferences);
-  console.log('[Discovery] Search query:', query);
-  
   const jobs: Job[] = [];
-  
-  // Build task for reporting
   const task = buildDiscoveryTask(query, maxJobs);
   
-  // Initialize session reporting
   initSession(task, query);
 
   try {
@@ -549,124 +668,78 @@ export async function startDiscovery(options: DiscoveryOptions): Promise<Discove
       error: undefined,
     });
 
-    console.log('[Discovery] Initializing agent...');
     startStep(0, 'Initializing automation agent');
-    logAction('init_agent', 'start', 'Creating browser context and agent');
+    logAction('init_agent', 'start', 'Creating browser context');
     
-    // Initialize agent (will open new tab)
     await initAgent();
-    logAction('init_agent', 'ok', 'Agent initialized successfully');
-    console.log('[Discovery] Agent initialized');
+    logAction('init_agent', 'ok', 'Agent initialized');
 
-    // Subscribe to ALL automation events for comprehensive logging
-    const unsubscribe = onDiscoveryEvent((event: DiscoveryEvent) => {
-      if (event.type === 'step') {
-        const stepNum = event.payload.step || 0;
-        if (event.payload.actionStatus !== 'fail') {
-          startStep(stepNum, event.payload.details);
-        }
-        updateState({
-          currentStep: stepNum,
-          maxSteps: event.payload.maxSteps || 50,
-        });
-      } else if (event.type === 'action') {
-        // Log individual actions (clicks, inputs, navigation, etc.)
-        const actionName = event.payload.action || 'unknown_action';
-        const status = event.payload.actionStatus || 'ok';
-        const details = event.payload.details || '';
-        logAction(actionName, status, details, status === 'fail' ? details : undefined);
-      } else if (event.type === 'llm') {
-        // Log LLM calls
-        const status = event.payload.actionStatus || 'ok';
-        const details = event.payload.details || '';
-        logAction('llm_call', status, details, status === 'fail' ? details : undefined);
-      } else if (event.type === 'error') {
-        const errorMsg = event.payload.error || 'Unknown error';
-        logAction('error', 'fail', errorMsg, errorMsg);
-        failStep(errorMsg);
-        
-        // Check for special error conditions
-        const errorLower = errorMsg.toLowerCase();
-        if (errorLower.includes('captcha')) {
-          updateState({ status: 'captcha', error: 'CAPTCHA detected' });
-        } else if (errorLower.includes('login')) {
-          updateState({ status: 'login_required', error: 'Login required' });
-        }
-      }
-    });
+    // Subscribe to automation events
+    agent?.on('all', handleExecutionEvent);
 
-    // Execute discovery task
-    console.log('[Discovery] Executing task...');
     startStep(1, 'Executing discovery task');
-    logAction('execute_task', 'start', `Task: ${task.substring(0, 100)}...`);
+    logAction('execute_task', 'start', `Search: ${query}`);
     
-    let result;
+    let result: TaskResult;
     let finalUrl: string | undefined;
     
     try {
       result = await executeTask(task);
       finalUrl = result.finalUrl;
       
-      console.log('[Discovery] Task completed with result:', {
-        success: result.success,
-        error: result.error,
-        stepsCount: result.steps?.length || 0,
-        finalAnswerLength: result.finalAnswer?.length || 0,
-      });
-      
-      // Log each step from the result
+      // Log step records from result
       for (const stepRecord of result.steps || []) {
         startStep(stepRecord.step, stepRecord.goal, stepRecord.url);
         for (const action of stepRecord.actions) {
-          const actionStatus = action.result.error ? 'fail' : 'ok';
           logAction(
             action.name, 
-            actionStatus, 
+            action.result.error ? 'fail' : 'ok', 
             JSON.stringify(action.args).substring(0, 100),
             action.result.error || undefined
           );
         }
-        if (stepRecord.url) {
-          urlsVisited.add(stepRecord.url);
-        }
+        if (stepRecord.url) urlsVisited.add(stepRecord.url);
       }
       
-      logAction('execute_task', 'ok', `Completed with ${result.steps?.length || 0} steps`);
+      logAction('execute_task', 'ok', `${result.steps?.length || 0} steps completed`);
     } catch (taskError) {
       const errorMsg = taskError instanceof Error ? taskError.message : String(taskError);
-      console.error('[Discovery] Task execution threw error:', taskError);
-      logAction('execute_task', 'fail', 'Task execution failed', errorMsg);
+      logAction('execute_task', 'fail', 'Task failed', errorMsg);
       failStep(errorMsg);
       throw taskError;
     }
-    
-    console.log('[Discovery] Task result:', result);
-
-    unsubscribe();
 
     if (!result.success) {
-      // Check for special conditions
       const errorLower = result.error?.toLowerCase() || '';
       const answerLower = result.finalAnswer?.toLowerCase() || '';
 
       if (errorLower.includes('captcha') || answerLower.includes('captcha')) {
         updateState({ status: 'captcha', error: 'CAPTCHA detected' });
-        const report = finalizeSessionReport(false, 'captcha', [], 'CAPTCHA detected', finalUrl);
-        return { success: false, jobs: [], error: 'CAPTCHA detected', stoppedReason: 'captcha', report };
+        return { 
+          success: false, jobs: [], error: 'CAPTCHA detected', 
+          stoppedReason: 'captcha', 
+          report: finalizeSessionReport(false, 'captcha', [], 'CAPTCHA detected', finalUrl) 
+        };
       }
 
       if (errorLower.includes('login') || answerLower.includes('login_required')) {
         updateState({ status: 'login_required', error: 'Login required' });
-        const report = finalizeSessionReport(false, 'login', [], 'Login required', finalUrl);
-        return { success: false, jobs: [], error: 'Login required', stoppedReason: 'login', report };
+        return { 
+          success: false, jobs: [], error: 'Login required', 
+          stoppedReason: 'login', 
+          report: finalizeSessionReport(false, 'login', [], 'Login required', finalUrl) 
+        };
       }
 
       updateState({ status: 'error', error: result.error });
-      const report = finalizeSessionReport(false, 'error', [], result.error, finalUrl);
-      return { success: false, jobs: [], error: result.error, stoppedReason: 'error', report };
+      return { 
+        success: false, jobs: [], error: result.error, 
+        stoppedReason: 'error', 
+        report: finalizeSessionReport(false, 'error', [], result.error, finalUrl) 
+      };
     }
 
-    // Parse extracted jobs
+    // Parse jobs from result
     startStep(discoveryState.currentStep + 1, 'Parsing extracted jobs');
     logAction('parse_jobs', 'start', 'Parsing jobs from result');
     
@@ -683,30 +756,25 @@ export async function startDiscovery(options: DiscoveryOptions): Promise<Discove
     updateState({ status: 'idle' });
 
     const stoppedReason = jobs.length >= maxJobs ? 'max_jobs' : 'complete';
-    const report = finalizeSessionReport(true, stoppedReason, jobs, undefined, finalUrl);
-
     return {
       success: true,
       jobs,
       stoppedReason,
-      report,
+      report: finalizeSessionReport(true, stoppedReason, jobs, undefined, finalUrl),
     };
   } catch (err) {
-    console.error('[Discovery] Error:', err);
     const errorMessage = err instanceof Error ? err.message : 'Unknown error';
     updateState({ status: 'error', error: errorMessage });
-    
-    const report = finalizeSessionReport(false, 'error', jobs, errorMessage);
-    return { success: false, jobs, error: errorMessage, stoppedReason: 'error', report };
+    return { 
+      success: false, jobs, error: errorMessage, 
+      stoppedReason: 'error', 
+      report: finalizeSessionReport(false, 'error', jobs, errorMessage) 
+    };
   } finally {
-    console.log('[Discovery] Cleaning up agent');
     await cleanupAgent();
   }
 }
 
-/**
- * Stop discovery
- */
 export async function stopDiscovery(): Promise<void> {
   if (discoveryState.status === 'running') {
     await stopAgent();
@@ -714,26 +782,16 @@ export async function stopDiscovery(): Promise<void> {
   }
 }
 
-/**
- * Get current discovery state
- */
 export function getDiscoveryState(): DiscoveryState {
   return { ...discoveryState };
 }
 
-/**
- * Subscribe to state changes
- */
 export function onStateChange(listener: (state: DiscoveryState) => void): () => void {
   stateListeners.add(listener);
   return () => stateListeners.delete(listener);
 }
 
-/**
- * Subscribe to job found events
- */
 export function onJobFound(listener: (job: Job) => void): () => void {
   jobListeners.add(listener);
   return () => jobListeners.delete(listener);
 }
-
