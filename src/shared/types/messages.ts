@@ -15,7 +15,8 @@ export type MessageType =
   | 'START_DISCOVERY'
   | 'STOP_DISCOVERY'
   | 'DISCOVERY_STATE'
-  | 'DISCOVERY_JOB_FOUND';
+  | 'DISCOVERY_JOB_FOUND'
+  | 'GET_SESSION_REPORT';
 
 export interface BaseMessage<T extends MessageType, P = unknown> {
   type: T;
@@ -59,6 +60,7 @@ export type StartDiscoveryMessage = BaseMessage<'START_DISCOVERY', StartDiscover
 export type StopDiscoveryMessage = BaseMessage<'STOP_DISCOVERY', undefined>;
 export type DiscoveryStateMessage = BaseMessage<'DISCOVERY_STATE', DiscoveryStatePayload>;
 export type DiscoveryJobFoundMessage = BaseMessage<'DISCOVERY_JOB_FOUND', Job>;
+export type GetSessionReportMessage = BaseMessage<'GET_SESSION_REPORT', undefined>;
 
 export type ExtensionMessage =
   | CaptureJobMessage
@@ -72,7 +74,8 @@ export type ExtensionMessage =
   | StartDiscoveryMessage
   | StopDiscoveryMessage
   | DiscoveryStateMessage
-  | DiscoveryJobFoundMessage;
+  | DiscoveryJobFoundMessage
+  | GetSessionReportMessage;
 
 export function createMessage<T extends MessageType, P>(
   type: T,

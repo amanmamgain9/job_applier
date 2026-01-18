@@ -1,12 +1,12 @@
 /**
  * Automation Agent Service
  * 
- * Wrapper around @riruru/automation-core for Chrome Extension context.
+ * Wrapper around local automation-core for Chrome Extension context.
  * Provides job discovery and application automation.
  */
 
-import { AutomationAgent, BrowserContext } from '@riruru/automation-core';
-import type { TaskResult, ExecutionEvent } from '@riruru/automation-core';
+import { AutomationAgent, BrowserContext } from '@/lib/automation-core';
+import type { TaskResult, ExecutionEvent } from '@/lib/automation-core';
 import { getLLMConfig } from './config';
 import type { DiscoveryEvent, DiscoveryEventHandler } from './types';
 
@@ -146,16 +146,56 @@ function mapExecutionEvent(event: ExecutionEvent): DiscoveryEvent | null {
           step: event.step,
           maxSteps: event.maxSteps,
           details: event.details,
+          timestamp: event.timestamp,
         },
       };
 
     case 'step_fail':
+      return {
+        type: 'step',
+        payload: {
+          step: event.step,
+          maxSteps: event.maxSteps,
+          details: event.details,
+          actionStatus: 'fail',
+          timestamp: event.timestamp,
+        },
+      };
+
+    case 'action_start':
+    case 'action_ok':
     case 'action_fail':
+      return {
+        type: 'action',
+        payload: {
+          action: event.action,
+          details: event.details,
+          actionStatus: event.type === 'action_start' ? 'start' : event.type === 'action_ok' ? 'ok' : 'fail',
+          step: event.step,
+          timestamp: event.timestamp,
+        },
+      };
+
+    case 'llm_start':
+    case 'llm_ok':
+    case 'llm_fail':
+      return {
+        type: 'llm',
+        payload: {
+          action: 'llm_call',
+          details: event.details,
+          actionStatus: event.type === 'llm_start' ? 'start' : event.type === 'llm_ok' ? 'ok' : 'fail',
+          step: event.step,
+          timestamp: event.timestamp,
+        },
+      };
+
     case 'task_fail':
       return {
         type: 'error',
         payload: {
           error: event.details,
+          timestamp: event.timestamp,
         },
       };
 
@@ -165,6 +205,7 @@ function mapExecutionEvent(event: ExecutionEvent): DiscoveryEvent | null {
         payload: {
           status: 'idle',
           details: 'Task completed',
+          timestamp: event.timestamp,
         },
       };
 
@@ -174,6 +215,7 @@ function mapExecutionEvent(event: ExecutionEvent): DiscoveryEvent | null {
         payload: {
           status: 'idle',
           details: 'Task cancelled',
+          timestamp: event.timestamp,
         },
       };
 

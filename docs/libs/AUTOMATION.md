@@ -36,6 +36,14 @@ LLM-powered browser automation extracted from [Nanobrowser](https://github.com/n
 npm install @riruru/automation-core puppeteer-core zod
 ```
 
+After installation, copy the required DOM script to your extension's public folder:
+
+```bash
+cp node_modules/@riruru/automation-core/buildDomTree.js public/
+```
+
+This script is injected into web pages to extract interactive elements and create visual highlights.
+
 ### Peer Dependencies
 
 | Package | Purpose |

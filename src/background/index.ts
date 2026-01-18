@@ -7,7 +7,9 @@ import {
   getDiscoveryState, 
   onStateChange, 
   onJobFound,
-  hasLLMConfig 
+  hasLLMConfig,
+  getLastSessionReport,
+  getSessionReports,
 } from '@/services/automation';
 
 // Service Worker initialization
@@ -158,6 +160,17 @@ async function handleMessage(
       // Request current state
       const state = getDiscoveryState();
       return state;
+    }
+    
+    case 'GET_SESSION_REPORT': {
+      const lastReport = getLastSessionReport();
+      const allReports = getSessionReports();
+      console.log('[Background] GET_SESSION_REPORT - returning', allReports.length, 'reports');
+      return { 
+        lastReport,
+        allReports,
+        count: allReports.length,
+      };
     }
     
     default:

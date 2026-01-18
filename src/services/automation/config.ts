@@ -5,7 +5,7 @@
  * For now, reads from environment variables
  */
 
-import type { LLMConfig, LLMProvider } from '@riruru/automation-core';
+import type { LLMConfig, LLMProvider } from '@/lib/automation-core';
 
 export function getLLMConfig(): LLMConfig {
   const provider = (import.meta.env.VITE_LLM_PROVIDER as LLMProvider) || 'anthropic';

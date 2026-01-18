@@ -8,6 +8,8 @@ export interface Salary {
   currency: string;
 }
 
+export type ExperienceLevel = 'internship' | 'entry' | 'associate' | 'mid-senior' | 'director' | 'executive';
+
 export interface Job {
   id: string;
   linkedinJobId: string;
@@ -17,8 +19,11 @@ export interface Job {
   location: string;
   locationType: LocationType;
   salary?: Salary;
+  salaryText?: string; // Raw salary text from LinkedIn (e.g., "$120K - $150K/yr")
   jobType: JobType;
+  experienceLevel?: ExperienceLevel;
   postedAt: string;
+  postedTime?: string; // Raw time text (e.g., "2 days ago")
   capturedAt: string;
   url: string;
   description?: string;
