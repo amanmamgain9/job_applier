@@ -47,7 +47,7 @@ export const useJobStore = create<JobState>((set, get) => ({
   setJobs: (jobs) => set({ jobs }),
   
   addJob: (job) => set((state) => {
-    const exists = state.jobs.some(j => j.linkedinJobId === job.linkedinJobId);
+    const exists = state.jobs.some(j => j.sourceJobId === job.sourceJobId);
     if (exists) return state;
     return { jobs: [job, ...state.jobs] };
   }),

@@ -12,14 +12,14 @@ export type ExperienceLevel = 'internship' | 'entry' | 'associate' | 'mid-senior
 
 export interface Job {
   id: string;
-  linkedinJobId: string;
+  sourceJobId: string; // Job ID from the source platform (LinkedIn, Indeed, etc.)
   title: string;
   company: string;
   companyLogo?: string;
   location: string;
   locationType: LocationType;
   salary?: Salary;
-  salaryText?: string; // Raw salary text from LinkedIn (e.g., "$120K - $150K/yr")
+  salaryText?: string; // Raw salary text (e.g., "$120K - $150K/yr")
   jobType: JobType;
   experienceLevel?: ExperienceLevel;
   postedAt: string;
@@ -28,7 +28,6 @@ export interface Job {
   url: string;
   description?: string;
   status: JobStatus;
-  easyApply: boolean;
   applicationId?: string;
 }
 

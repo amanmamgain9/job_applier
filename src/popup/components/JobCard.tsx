@@ -73,12 +73,6 @@ export function JobCard({
             {formatSalary(job.salary)}
           </span>
         )}
-        
-        {job.easyApply && (
-          <span className="px-2 py-1 rounded-md bg-[var(--color-accent)]/10 text-[var(--color-accent)] font-medium">
-            Easy Apply
-          </span>
-        )}
       </div>
       
       {/* Posted time */}

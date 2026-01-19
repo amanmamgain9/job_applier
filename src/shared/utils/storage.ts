@@ -14,7 +14,7 @@ export async function setJobs(jobs: Job[]): Promise<void> {
 
 export async function addJob(job: Job): Promise<void> {
   const jobs = await getJobs();
-  const exists = jobs.some(j => j.linkedinJobId === job.linkedinJobId);
+  const exists = jobs.some(j => j.sourceJobId === job.sourceJobId);
   if (!exists) {
     jobs.unshift(job);
     await setJobs(jobs);

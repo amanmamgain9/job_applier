@@ -2,8 +2,7 @@
 /**
  * Job Discovery
  * 
- * Everything about finding jobs on LinkedIn:
- * - Building search queries from preferences
+ * Platform-agnostic job discovery:
  * - Creating LLM task prompts
  * - Parsing job results
  * - Session tracking and reporting
@@ -11,7 +10,6 @@
  */
 
 import type { Job } from '@shared/types/job';
-import type { ExtractedPreferences } from '@/components/onboarding/types';
 import { AutomationAgent, BrowserContext } from '@/lib/automation-core';
 import type { TaskResult, ExecutionEvent, LLMConfig, LLMProvider } from '@/lib/automation-core';
 
@@ -32,8 +30,8 @@ export interface DiscoveryState {
 
 export interface DiscoveryOptions {
   maxJobs: number;
-  preferences: ExtractedPreferences;
-  searchQuery?: string;
+  /** URL to navigate to before starting discovery */
+  url: string;
 }
 
 export interface DiscoveryResult {
@@ -68,7 +66,7 @@ export interface SessionReport {
   endedAt: number;
   duration: number;
   task: string;
-  searchQuery: string;
+  sourceUrl: string;
   success: boolean;
   stoppedReason: string;
   error?: string;
@@ -95,8 +93,7 @@ interface ParsedJobData {
   experienceLevel?: string;
   description?: string;
   postedTime?: string;
-  easyApply?: boolean;
-  linkedinJobId?: string;
+  jobId?: string;
 }
 
 // ============================================================================
@@ -160,7 +157,7 @@ export function hasLLMConfig(): boolean {
 // Agent Lifecycle
 // ============================================================================
 
-async function initAgent(): Promise<void> {
+async function initAgent(navigateToUrl?: string): Promise<void> {
   console.log('[Agent] Initializing...');
   await cleanupAgent();
 
@@ -179,6 +176,14 @@ async function initAgent(): Promise<void> {
   
   console.log('[Agent] New tab created:', newTab.id);
   browserContext = await BrowserContext.fromTab(newTab.id);
+
+  // Navigate to the target URL before creating the agent
+  // This saves LLM tokens by not using AI for simple navigation
+  if (navigateToUrl) {
+    console.log('[Agent] Navigating to:', navigateToUrl);
+    await browserContext.navigateTo(navigateToUrl);
+    console.log('[Agent] Navigation complete');
+  }
 
   agent = new AutomationAgent({
     context: browserContext,
@@ -218,107 +223,66 @@ async function cleanupAgent(): Promise<void> {
 }
 
 // ============================================================================
-// Search Query Building
-// ============================================================================
-
-function buildSearchQuery(preferences: ExtractedPreferences): string {
-  const parts: string[] = [];
-
-  if (preferences.roles?.length) {
-    parts.push(preferences.roles.slice(0, 3).join(' OR '));
-  }
-
-  if (preferences.locations?.length) {
-    const remote = preferences.locations.find((l) => l.type === 'remote');
-    if (remote) {
-      parts.push('remote');
-    } else {
-      const locations = preferences.locations
-        .filter((l) => l.location)
-        .map((l) => l.location)
-        .slice(0, 2);
-      if (locations.length) {
-        parts.push(locations.join(' OR '));
-      }
-    }
-  }
-
-  return parts.join(' ') || 'software engineer';
-}
-
-// ============================================================================
 // Task Prompt Building
 // ============================================================================
 
-function buildDiscoveryTask(searchQuery: string, maxJobs: number): string {
-  const linkedinUrl = `https://www.linkedin.com/jobs/search/?keywords=${encodeURIComponent(searchQuery)}`;
-  
+function buildDiscoveryTask(maxJobs: number): string {
   return `
-TASK: Find and extract EXACTLY ${maxJobs} job listings from LinkedIn with FULL DETAILS.
+TASK: Extract ${maxJobs} job listings from this job search page.
 
-You MUST collect ${maxJobs} jobs. Do not stop until you have ${maxJobs} jobs or run out of listings.
+You are on a job search results page. Extract job details by clicking each listing.
 
-=== PHASE 1: NAVIGATE ===
-Go to: ${linkedinUrl}
-Wait for the page to fully load.
+=== EXTRACTION LOOP (repeat until ${maxJobs} jobs collected) ===
 
-=== PHASE 2: COLLECT JOBS (Repeat until you have ${maxJobs} jobs) ===
-
-For EACH job listing in the left sidebar:
-
-1. CLICK on the job card to open its details in the right panel
-2. WAIT for the job details to load (look for job description text)
-3. EXTRACT these details from the right panel:
-   - title: Job title (e.g., "Senior Software Engineer")
-   - company: Company name
-   - location: Location (e.g., "San Francisco, CA" or "Remote")
-   - salary: Salary range if shown (e.g., "$120,000 - $150,000/yr") or null
-   - jobType: "Full-time", "Part-time", "Contract", etc.
+For each job listing:
+1. CLICK the job card to view details
+2. WAIT for details to load
+3. EXTRACT and immediately output via done() when you have enough jobs:
+   - title: Job title
+   - company: Company name  
+   - location: City/region or "Remote"
+   - salary: Salary if shown, otherwise null
+   - jobType: "Full-time", "Part-time", "Contract", "Internship"
    - experienceLevel: "Entry level", "Mid-Senior level", etc.
-   - easyApply: true if "Easy Apply" button is present, false otherwise
-   - linkedinJobId: The number from the URL (e.g., /jobs/view/4133166618/ → "4133166618")
-   - description: First 500 characters of the job description
-   - postedTime: When posted (e.g., "2 days ago", "1 week ago")
+   - jobId: Unique ID from URL or page (e.g., "/jobs/view/4133166618" → "4133166618")
+   - description: First 500 chars of description
+   - postedTime: When posted (e.g., "2 days ago")
+4. Track: After extracting, remember "Extracted: <jobId>" to avoid re-processing
+5. Move to NEXT unprocessed job card
 
-4. Use cache_content to save the extracted job data
-5. Move to the NEXT job card
+=== SCROLLING ===
+If fewer than ${maxJobs} jobs and more exist:
+- scroll_to_bottom or next_page to load more
+- Continue extracting new jobs only
 
-=== PHASE 3: SCROLL FOR MORE JOBS ===
-After processing visible jobs, if you have fewer than ${maxJobs} jobs:
-- Use scroll_to_bottom or next_page to load more job cards
-- Continue extracting from new jobs that appear
-- Repeat until you have ${maxJobs} jobs
-
-=== PHASE 4: FINISH ===
-Once you have collected ${maxJobs} jobs (or no more jobs available), call:
+=== FINISH ===
+When you have ${maxJobs} jobs OR no more available:
 done(success=true, text="[...array of job objects as JSON...]")
 
-=== EXAMPLE OUTPUT ===
+=== OUTPUT FORMAT ===
 [
   {
     "title": "Senior Frontend Engineer",
-    "company": "Thinkgrid Labs",
-    "location": "India (Remote)",
-    "salary": "$100,000 - $130,000/yr",
+    "company": "Acme Corp",
+    "location": "Remote",
+    "salary": "$120,000 - $150,000/yr",
     "jobType": "Full-time",
     "experienceLevel": "Mid-Senior level",
-    "easyApply": true,
-    "linkedinJobId": "4133166618",
-    "description": "We are looking for a Senior Frontend Engineer to join our team...",
+    "jobId": "4133166618",
+    "description": "We are looking for...",
     "postedTime": "1 week ago"
   }
 ]
 
-=== ERROR HANDLING ===
-- If you see a LOGIN page: done(success=false, text="login_required")
-- If you see CAPTCHA: done(success=false, text="captcha")
-- If blocked or error: done(success=false, text="error: <describe what happened>")
+=== ERRORS ===
+- LOGIN page: done(success=false, text="login_required")
+- CAPTCHA: done(success=false, text="captcha")  
+- Other error: done(success=false, text="error: <description>")
 
-=== IMPORTANT REMINDERS ===
-- You MUST click each job to see full details - don't just read the card
-- Use scroll_to_bottom or next_page to load more jobs
-- Keep track of how many jobs you've collected
-- Stop at exactly ${maxJobs} jobs
+=== KEY RULES ===
+- Click each job to see full details
+- Track extracted jobIds to avoid duplicates
+- Stop at ${maxJobs} jobs
 `.trim();
 }
 
@@ -343,8 +307,7 @@ function parseJobsFromResult(finalAnswer: string | undefined): ParsedJobData[] {
           experienceLevel: item.experienceLevel || null,
           description: item.description || '',
           postedTime: item.postedTime || null,
-          easyApply: Boolean(item.easyApply),
-          linkedinJobId: String(item.linkedinJobId || item.jobId || ''),
+          jobId: String(item.jobId || item.linkedinJobId || ''),
         }));
       }
     }
@@ -355,9 +318,9 @@ function parseJobsFromResult(finalAnswer: string | undefined): ParsedJobData[] {
   return [];
 }
 
-function createJob(partial: ParsedJobData): Job {
+function createJob(partial: ParsedJobData, sourceUrl?: string): Job {
   const now = new Date().toISOString();
-  const linkedinJobId = partial.linkedinJobId || crypto.randomUUID();
+  const jobId = partial.jobId || crypto.randomUUID();
 
   const locationLower = (partial.location || '').toLowerCase();
   let locationType: 'remote' | 'hybrid' | 'onsite' = 'onsite';
@@ -379,9 +342,22 @@ function createJob(partial: ParsedJobData): Job {
   else if (expLower.includes('director')) experienceLevel = 'director';
   else if (expLower.includes('executive')) experienceLevel = 'executive';
 
+  // Build URL based on source - detect platform from sourceUrl if provided
+  let url = '';
+  if (sourceUrl) {
+    if (sourceUrl.includes('linkedin.com')) {
+      url = `https://www.linkedin.com/jobs/view/${jobId}`;
+    } else if (sourceUrl.includes('indeed.com')) {
+      url = `https://www.indeed.com/viewjob?jk=${jobId}`;
+    } else {
+      // Generic fallback - just use the source URL
+      url = sourceUrl;
+    }
+  }
+
   return {
     id: crypto.randomUUID(),
-    linkedinJobId,
+    sourceJobId: jobId,
     title: partial.title || 'Unknown Title',
     company: partial.company || 'Unknown Company',
     location: partial.location || '',
@@ -393,9 +369,8 @@ function createJob(partial: ParsedJobData): Job {
     postedAt: now,
     postedTime: partial.postedTime,
     capturedAt: now,
-    url: `https://www.linkedin.com/jobs/view/${linkedinJobId}`,
+    url,
     status: 'pending',
-    easyApply: partial.easyApply ?? false,
   };
 }
 
@@ -435,14 +410,14 @@ function notifyJobFound(job: Job): void {
 // Session Reporting
 // ============================================================================
 
-function initSession(task: string, searchQuery: string): void {
+function initSession(task: string, sourceUrl: string): void {
   currentReport = {
     id: crypto.randomUUID(),
     startedAt: Date.now(),
     endedAt: Date.now(),
     duration: 0,
     task,
-    searchQuery,
+    sourceUrl,
     success: false,
     stoppedReason: 'running',
     totalSteps: 0,
@@ -534,7 +509,7 @@ function finalizeSessionReport(
       endedAt: Date.now(),
       duration: 0,
       task: '',
-      searchQuery: '',
+      sourceUrl: '',
       success: false,
       stoppedReason: 'error',
       error: 'No session was initialized',
@@ -647,17 +622,20 @@ export function clearSessionReports(): void {
 }
 
 export async function startDiscovery(options: DiscoveryOptions): Promise<DiscoveryResult> {
-  const { maxJobs = 20, preferences, searchQuery } = options;
+  const { maxJobs = 20, url } = options;
 
   if (discoveryState.status === 'running') {
     return { success: false, jobs: [], error: 'Discovery already running' };
   }
 
-  const query = searchQuery || buildSearchQuery(preferences);
+  if (!url) {
+    return { success: false, jobs: [], error: 'URL is required' };
+  }
+
   const jobs: Job[] = [];
-  const task = buildDiscoveryTask(query, maxJobs);
+  const task = buildDiscoveryTask(maxJobs);
   
-  initSession(task, query);
+  initSession(task, url);
 
   try {
     updateState({
@@ -668,17 +646,19 @@ export async function startDiscovery(options: DiscoveryOptions): Promise<Discove
       error: undefined,
     });
 
-    startStep(0, 'Initializing automation agent');
+    startStep(0, 'Initializing automation agent and navigating to job search');
     logAction('init_agent', 'start', 'Creating browser context');
+    logAction('navigate', 'start', `Navigating to: ${url}`);
     
-    await initAgent();
+    await initAgent(url);
+    logAction('navigate', 'ok', 'Navigation complete');
     logAction('init_agent', 'ok', 'Agent initialized');
 
     // Subscribe to automation events
     agent?.on('all', handleExecutionEvent);
 
     startStep(1, 'Executing discovery task');
-    logAction('execute_task', 'start', `Search: ${query}`);
+    logAction('execute_task', 'start', `URL: ${url}`);
     
     let result: TaskResult;
     let finalUrl: string | undefined;
@@ -747,7 +727,7 @@ export async function startDiscovery(options: DiscoveryOptions): Promise<Discove
     logAction('parse_jobs', 'ok', `Parsed ${parsedJobs.length} jobs`);
 
     for (const partial of parsedJobs) {
-      const job = createJob(partial);
+      const job = createJob(partial, url);
       jobs.push(job);
       updateState({ jobsFound: jobs.length });
       notifyJobFound(job);

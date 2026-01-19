@@ -127,11 +127,13 @@ async function handleMessage(
         };
       }
       
-      const { maxJobs = 20, searchQuery } = message.payload;
-      const preferencesResult = await chrome.storage.sync.get('preferences');
-      const preferences = preferencesResult.preferences?.extracted || { roles: [], locations: [] };
+      const { maxJobs = 20, url } = message.payload;
       
-      startDiscovery({ maxJobs, preferences, searchQuery })
+      if (!url) {
+        return { success: false, error: 'URL is required for discovery' };
+      }
+      
+      startDiscovery({ maxJobs, url })
         .then((result) => {
           logger.info('Discovery completed', { 
             success: result.success, 

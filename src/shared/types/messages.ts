@@ -52,8 +52,8 @@ export interface DiscoveryStatePayload {
 }
 
 export interface StartDiscoveryPayload {
+  url: string;
   maxJobs?: number;
-  searchQuery?: string;
 }
 
 export type StartDiscoveryMessage = BaseMessage<'START_DISCOVERY', StartDiscoveryPayload>;

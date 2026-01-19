@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Search, Square, AlertCircle, LogIn, ShieldAlert } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useDiscovery } from '../hooks/useDiscovery';
@@ -20,12 +21,30 @@ export function ScanJobsButton() {
     startDiscovery,
     stopDiscovery,
   } = useDiscovery();
+  
+  const [inputUrl, setInputUrl] = useState('');
 
-  const handleClick = () => {
+  const handleClick = async () => {
     if (isRunning) {
       stopDiscovery();
     } else {
-      startDiscovery();
+      // Use input URL or get current tab URL
+      let url = inputUrl.trim();
+      
+      if (!url) {
+        // Try to get current tab URL
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (tab?.url && (tab.url.includes('/jobs') || tab.url.includes('indeed.com'))) {
+          url = tab.url;
+        }
+      }
+      
+      if (!url) {
+        alert('Please enter a job search URL or navigate to a job search page');
+        return;
+      }
+      
+      startDiscovery({ url });
     }
   };
 
@@ -67,7 +86,7 @@ export function ScanJobsButton() {
         return {
           icon: <Search className="w-4 h-4" />,
           text: 'Scan Jobs',
-          subtext: 'Search LinkedIn based on your preferences',
+          subtext: 'Enter URL or use current tab',
           className: cn(
             'bg-gradient-to-r from-[var(--color-accent)] to-indigo-500',
             'hover:from-indigo-500 hover:to-[var(--color-accent)]',
@@ -81,7 +100,23 @@ export function ScanJobsButton() {
   const isDisabled = status === 'captcha' || status === 'login_required';
 
   return (
-    <div>
+    <div className="space-y-2">
+      {/* URL Input */}
+      {!isRunning && status === 'idle' && (
+        <input
+          type="url"
+          value={inputUrl}
+          onChange={(e) => setInputUrl(e.target.value)}
+          placeholder="https://linkedin.com/jobs/search?..."
+          className={cn(
+            'w-full px-3 py-2 rounded-lg text-sm',
+            'bg-[var(--color-bg-card)] border border-[var(--color-border)]',
+            'text-[var(--color-text)] placeholder:text-[var(--color-text-muted)]',
+            'focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)]/50'
+          )}
+        />
+      )}
+      
       <button
         onClick={handleClick}
         disabled={isDisabled}

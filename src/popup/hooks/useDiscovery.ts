@@ -79,7 +79,7 @@ export function useDiscovery() {
   }, [queryClient]);
 
   const startDiscovery = useCallback(
-    async (options?: { maxJobs?: number; searchQuery?: string }) => {
+    async (options: { url: string; maxJobs?: number }) => {
       try {
         // Optimistic update
         queryClient.setQueryData<DiscoveryState>(DISCOVERY_QUERY_KEY, (prev) =>
@@ -88,8 +88,8 @@ export function useDiscovery() {
 
         const response = await chrome.runtime.sendMessage(
           createMessage('START_DISCOVERY', {
-            maxJobs: options?.maxJobs ?? 20,
-            searchQuery: options?.searchQuery,
+            url: options.url,
+            maxJobs: options.maxJobs ?? 20,
           })
         );
 

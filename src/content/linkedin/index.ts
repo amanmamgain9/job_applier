@@ -53,7 +53,7 @@ async function handleJobDetected(jobData: ReturnType<typeof scrapeJobCards>) {
   
   const job: Job = {
     id: generateId(),
-    linkedinJobId: jobData.linkedinJobId,
+    sourceJobId: jobData.linkedinJobId,
     title: jobData.title,
     company: jobData.company || 'Unknown Company',
     companyLogo: jobData.companyLogo,
@@ -66,7 +66,6 @@ async function handleJobDetected(jobData: ReturnType<typeof scrapeJobCards>) {
     url: jobData.url || window.location.href,
     description: jobData.description,
     status: 'pending',
-    easyApply: jobData.easyApply ?? false,
   };
   
   // Send to background
