@@ -87,7 +87,6 @@ export function createBindingsWithFilters(): PageBindings {
         selector: '.filter-location',
         type: 'dropdown',
         optionsSelector: '.filter-location option',
-        applyButton: '.filter-apply',
       },
       remote: {
         selector: '.filter-remote',
@@ -96,8 +95,12 @@ export function createBindingsWithFilters(): PageBindings {
       salary: {
         selector: '.filter-salary',
         type: 'input',
-        applyButton: '.filter-apply',
       },
+    },
+    // Named elements - apply button is just another element
+    ELEMENTS: {
+      applyFilters: '.filter-apply',
+      sortDropdown: '.sort-dropdown',
     },
   });
 }

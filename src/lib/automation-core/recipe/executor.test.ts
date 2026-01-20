@@ -361,25 +361,25 @@ describe('RecipeExecutor', () => {
   });
 
   // ============================================================================
-  // APPLY_FILTER Command
+  // GO_TO Command (Generic element navigation)
   // ============================================================================
 
-  describe('APPLY_FILTER Command', () => {
-    it('should fail if no filter was navigated to first', async () => {
+  describe('GO_TO Command', () => {
+    it('should fail if element name not defined in ELEMENTS', async () => {
       const executor = new RecipeExecutor(asPage(mockPage), createBindingsWithFilters());
       const recipe: Recipe = {
         id: 'test',
         name: 'Test',
-        commands: [cmd.applyFilter()],
+        commands: [cmd.goTo('nonExistentElement')],
       };
 
       const result = await executor.execute(recipe);
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain('GO_TO_FILTER');
+      expect(result.error).toContain('not defined in ELEMENTS');
     });
 
-    it('should click apply button from bindings after navigating to filter', async () => {
+    it('should navigate to element defined in ELEMENTS and allow click', async () => {
       mockPage._mocks.selectorExists.mockResolvedValue(true);
       
       const executor = new RecipeExecutor(asPage(mockPage), createBindingsWithFilters());
@@ -387,8 +387,8 @@ describe('RecipeExecutor', () => {
         id: 'test',
         name: 'Test',
         commands: [
-          cmd.goToFilter('location'),
-          cmd.applyFilter(),
+          cmd.goTo('applyFilters'),
+          cmd.click(),
         ],
       };
 
@@ -398,50 +398,43 @@ describe('RecipeExecutor', () => {
       expect(mockPage._mocks.clickSelector).toHaveBeenCalledWith('.filter-apply');
     });
 
-    it('should fail if filter has no applyButton defined', async () => {
-      mockPage._mocks.selectorExists.mockResolvedValue(true);
+    it('should fail if element not found on page', async () => {
+      mockPage._mocks.selectorExists.mockResolvedValue(false);
       
-      // 'remote' filter has no applyButton in createBindingsWithFilters()
       const executor = new RecipeExecutor(asPage(mockPage), createBindingsWithFilters());
       const recipe: Recipe = {
         id: 'test',
         name: 'Test',
-        commands: [
-          cmd.goToFilter('remote'),
-          cmd.applyFilter(),
-        ],
+        commands: [cmd.goTo('applyFilters')],
       };
 
       const result = await executor.execute(recipe);
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain('no applyButton defined');
+      expect(result.error).toContain('Element not found');
     });
 
-    it('should fail if apply button element not found on page', async () => {
-      // Create mock that finds filter element but not apply button
-      mockPage = createMockPage({
-        elements: [createDropdownElement(0, 'Location filter')],
-      });
-      // First call (filter selector) succeeds, second call (apply button) fails
-      mockPage._mocks.selectorExists
-        .mockResolvedValueOnce(true)  // GO_TO_FILTER finds the filter
-        .mockResolvedValueOnce(false); // APPLY_FILTER doesn't find the apply button
+    it('should work with filter + GO_TO pattern for applying filters', async () => {
+      mockPage._mocks.selectorExists.mockResolvedValue(true);
       
       const executor = new RecipeExecutor(asPage(mockPage), createBindingsWithFilters());
+      // Simplified: navigate to filter, then navigate to apply button and click
+      // (SELECT is tested separately and requires more complex mock setup)
       const recipe: Recipe = {
         id: 'test',
         name: 'Test',
         commands: [
           cmd.goToFilter('location'),
-          cmd.applyFilter(),
+          // Skip SELECT for this test - it's tested elsewhere
+          cmd.goTo('applyFilters'),
+          cmd.click(),
         ],
       };
 
       const result = await executor.execute(recipe);
 
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('Apply button not found');
+      expect(result.success).toBe(true);
+      expect(mockPage._mocks.clickSelector).toHaveBeenCalledWith('.filter-apply');
     });
   });
 

@@ -24,6 +24,7 @@ export interface WaitCommand { type: 'WAIT'; seconds: number }
 // Going To (focus on element)
 export interface GoToSearchBoxCommand { type: 'GO_TO_SEARCH_BOX' }
 export interface GoToFilterCommand { type: 'GO_TO_FILTER'; name: string }
+export interface GoToCommand { type: 'GO_TO'; name: string }
 export interface GoToListCommand { type: 'GO_TO_LIST' }
 export interface GoToItemCommand { type: 'GO_TO_ITEM'; which: 'first' | 'next' | 'current' | 'unprocessed' }
 export interface GoToDetailsCommand { type: 'GO_TO_DETAILS' }
@@ -34,7 +35,6 @@ export interface SubmitCommand { type: 'SUBMIT' }
 export interface ClickCommand { type: 'CLICK' }
 export interface ClickItemCommand { type: 'CLICK_ITEM' }
 export interface SelectCommand { type: 'SELECT'; option: string }
-export interface ApplyFilterCommand { type: 'APPLY_FILTER' }
 export interface ClearCommand { type: 'CLEAR' }
 export interface CheckCommand { type: 'CHECK' }
 export interface UncheckCommand { type: 'UNCHECK' }
@@ -89,6 +89,7 @@ export type Command =
   // Going To
   | GoToSearchBoxCommand
   | GoToFilterCommand
+  | GoToCommand
   | GoToListCommand
   | GoToItemCommand
   | GoToDetailsCommand
@@ -98,7 +99,6 @@ export type Command =
   | ClickCommand
   | ClickItemCommand
   | SelectCommand
-  | ApplyFilterCommand
   | ClearCommand
   | CheckCommand
   | UncheckCommand
@@ -172,6 +172,7 @@ export const cmd = {
   // Going To
   goToSearchBox: (): GoToSearchBoxCommand => ({ type: 'GO_TO_SEARCH_BOX' }),
   goToFilter: (name: string): GoToFilterCommand => ({ type: 'GO_TO_FILTER', name }),
+  goTo: (name: string): GoToCommand => ({ type: 'GO_TO', name }),
   goToList: (): GoToListCommand => ({ type: 'GO_TO_LIST' }),
   goToItem: (which: 'first' | 'next' | 'current' | 'unprocessed' = 'next'): GoToItemCommand => 
     ({ type: 'GO_TO_ITEM', which }),
@@ -183,7 +184,6 @@ export const cmd = {
   click: (): ClickCommand => ({ type: 'CLICK' }),
   clickItem: (): ClickItemCommand => ({ type: 'CLICK_ITEM' }),
   select: (option: string): SelectCommand => ({ type: 'SELECT', option }),
-  applyFilter: (): ApplyFilterCommand => ({ type: 'APPLY_FILTER' }),
   clear: (): ClearCommand => ({ type: 'CLEAR' }),
   check: (): CheckCommand => ({ type: 'CHECK' }),
   uncheck: (): UncheckCommand => ({ type: 'UNCHECK' }),

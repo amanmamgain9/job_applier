@@ -13,6 +13,7 @@ import type {
   ForEachItemInListCommand,
   RepeatCommand,
   IfNewItemsCommand,
+  GoToCommand,
 } from './commands';
 import type { PageBindings, StateCondition } from './bindings';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
@@ -31,8 +32,6 @@ export interface ExecutionContext {
   collected: ExtractedItem[];
   /** Current focused element */
   currentElement: unknown | null;
-  /** Current filter name (for APPLY_FILTER to look up applyButton) */
-  currentFilterName: string | null;
   /** Current item in FOR_EACH loop */
   currentItem: { element: unknown; id: string } | null;
   /** Current item index in FOR_EACH loop */
@@ -250,8 +249,10 @@ export class RecipeExecutor {
           if (!this.context.currentElement) {
             return { success: false, error: `Filter element not found: ${this.bindings.FILTERS[command.name].selector}` };
           }
-          this.context.currentFilterName = command.name;
           return { success: true };
+          
+        case 'GO_TO':
+          return await this.goToElement(command);
           
         case 'GO_TO_LIST':
           this.context.currentElement = await this.findElement(this.bindings.LIST);
@@ -305,9 +306,6 @@ export class RecipeExecutor {
           }
           await this.selectOption(this.context.currentElement, command.option);
           return { success: true };
-          
-        case 'APPLY_FILTER':
-          return await this.applyCurrentFilter();
           
         case 'CLEAR':
           if (!this.context.currentElement) {
@@ -410,7 +408,6 @@ export class RecipeExecutor {
       processedIds: new Set(),
       collected: [],
       currentElement: null,
-      currentFilterName: null,
       currentItem: null,
       currentItemIndex: -1,
       extractedContent: null,
@@ -567,34 +564,17 @@ export class RecipeExecutor {
     }
   }
   
-  private async applyCurrentFilter(): Promise<CommandResult> {
-    // Must have navigated to a filter first
-    if (!this.context.currentFilterName) {
-      return { success: false, error: 'APPLY_FILTER called without first navigating to a filter (use GO_TO_FILTER)' };
+  private async goToElement(command: GoToCommand): Promise<CommandResult> {
+    const selector = this.bindings.ELEMENTS?.[command.name];
+    if (!selector) {
+      return { success: false, error: `Element "${command.name}" not defined in ELEMENTS bindings` };
     }
     
-    const filter = this.bindings.FILTERS?.[this.context.currentFilterName];
-    if (!filter) {
-      return { success: false, error: `Filter "${this.context.currentFilterName}" not found in bindings` };
+    this.context.currentElement = await this.findElement(selector);
+    if (!this.context.currentElement) {
+      return { success: false, error: `Element not found: ${selector}` };
     }
     
-    // Check if filter has an apply button defined
-    if (!filter.applyButton) {
-      return { success: false, error: `Filter "${this.context.currentFilterName}" has no applyButton defined in bindings` };
-    }
-    
-    // Try to click the apply button
-    const exists = await this.evaluateSelector(filter.applyButton);
-    if (!exists) {
-      return { success: false, error: `Apply button not found: ${filter.applyButton}` };
-    }
-    
-    const clicked = await this.page.clickSelector(filter.applyButton);
-    if (!clicked) {
-      return { success: false, error: `Failed to click apply button: ${filter.applyButton}` };
-    }
-    
-    await this.wait(500); // Wait for filter to apply
     return { success: true };
   }
   

@@ -56,11 +56,14 @@ RULES:
 5. For LIST_ITEM, look for repeating elements - usually <li>, <div>, or <a> with similar classes
 6. For LIST, find the parent container of the repeating items
 7. If you cannot find a suitable selector, use "body" as a fallback
+8. For ELEMENTS, identify any interactive elements that might be useful (buttons, dropdowns, sort controls, apply buttons)
 
 LOOK FOR THESE PATTERNS IN THE DOM:
 - Job cards usually have classes containing: "job", "card", "list-item", "result"
 - Job IDs are often in data-job-id or data-occludable-job-id attributes
-- Lists are often in <ul>, <ol>, or divs with "list", "results", "container" in class names`;
+- Lists are often in <ul>, <ol>, or divs with "list", "results", "container" in class names
+- Buttons often have "button", "btn", or role="button"
+- Apply/submit buttons often contain text like "Apply", "Show results", "Submit"`;
 
 const DISCOVERY_USER_TEMPLATE = `Analyze this job search page DOM and output CSS selectors.
 
@@ -76,6 +79,7 @@ TASK: Find CSS selectors from the DOM above for:
 1. LIST_ITEM: The repeating job card element (look for <li> or <div> with job data attributes or job-related classes)
 2. LIST: Parent container of job cards (usually <ul> or <div> containing LIST_ITEMs)
 3. DETAILS_CONTENT: Selectors for the content WITHIN each job card (title, company, location text)
+4. ELEMENTS: Named interactive elements like buttons, dropdowns, sort controls (name → selector)
 
 For LinkedIn specifically:
 - Job cards usually have data-occludable-job-id attribute
@@ -92,6 +96,10 @@ OUTPUT VALID JSON:
   "LIST_ITEM": "li[data-occludable-job-id]",
   "DETAILS_PANEL": null,
   "DETAILS_CONTENT": ["li[data-occludable-job-id]"],
+  "ELEMENTS": {
+    "sortDropdown": ".jobs-search-sort-dropdown",
+    "applyFilters": "button.show-results"
+  },
   "SCROLL_CONTAINER": null,
   "PAGE_LOADED": { "exists": "li[data-occludable-job-id]" },
   "LIST_LOADED": { "exists": "li[data-occludable-job-id]" },
@@ -109,7 +117,8 @@ OUTPUT VALID JSON:
 CRITICAL: 
 - DETAILS_CONTENT must NOT be empty - use the LIST_ITEM selector as fallback
 - Use "inline" for CLICK_BEHAVIOR when details are IN the list item itself
-- Use "shows_panel" when clicking opens a separate panel`;
+- Use "shows_panel" when clicking opens a separate panel
+- ELEMENTS is optional but useful for buttons, sort dropdowns, apply buttons, etc.`;
 
 const FIX_SYSTEM_PROMPT = `You are fixing a broken page binding. A command failed because the selector doesn't match.
 
@@ -295,6 +304,7 @@ export class RecipeNavigator {
       DETAILS_CONTENT: detailsContent,
       
       FILTERS: parsed.FILTERS as PageBindings['FILTERS'],
+      ELEMENTS: parsed.ELEMENTS as Record<string, string> | undefined,
       
       SCROLL_CONTAINER: parsed.SCROLL_CONTAINER as string | undefined,
       LOAD_MORE_BUTTON: parsed.LOAD_MORE_BUTTON as string | undefined,

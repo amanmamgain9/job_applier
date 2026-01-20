@@ -85,8 +85,10 @@ export interface PageBindings {
     selector: string;
     type: 'dropdown' | 'checkbox' | 'button' | 'input';
     optionsSelector?: string;
-    applyButton?: string;
   }>;
+  
+  /** Named elements you can navigate to (buttons, dropdowns, any interactive element) */
+  ELEMENTS?: Record<string, string>;
   
   /** Scroll container (if not window) */
   SCROLL_CONTAINER?: string;
@@ -211,6 +213,12 @@ export const exampleBindings: Record<string, PageBindings> = {
       '.jobs-description-content',
     ],
     
+    // Named elements for GO_TO command
+    ELEMENTS: {
+      sortDropdown: '.jobs-search-sort-button',
+      showResults: '.filter-show-results-button',
+    },
+    
     SCROLL_CONTAINER: '.jobs-search-results-list',
     
     PAGE_LOADED: { exists: '.jobs-search-results-list' },
@@ -251,6 +259,12 @@ export const exampleBindings: Record<string, PageBindings> = {
       '.jobsearch-JobInfoHeader',
       '.jobsearch-JobComponent-description',
     ],
+    
+    // Named elements for GO_TO command
+    ELEMENTS: {
+      sortDropdown: '#filter-dateposted',
+      findJobsButton: '.yosegi-InlineWhatWhere-primaryButton',
+    },
     
     PAGE_LOADED: { exists: '.jobsearch-ResultsList' },
     LIST_LOADED: { exists: '.job_seen_beacon' },
