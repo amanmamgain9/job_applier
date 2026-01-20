@@ -123,7 +123,7 @@ async function handleMessage(
       if (!hasLLMConfig()) {
         return { 
           success: false, 
-          error: 'LLM not configured. Set VITE_ANTHROPIC_API_KEY in .env file.' 
+          error: 'LLM not configured. Set VITE_GEMINI_API_KEY in .env file.' 
         };
       }
       
@@ -158,10 +158,12 @@ async function handleMessage(
     }
     
     case 'GET_SESSION_REPORT': {
+      const allReports = await getSessionReports();
+      const lastReport = await getLastSessionReport();
       return { 
-        lastReport: getLastSessionReport(),
-        allReports: getSessionReports(),
-        count: getSessionReports().length,
+        lastReport,
+        allReports,
+        count: allReports.length,
       };
     }
     

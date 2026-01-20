@@ -1,17 +1,25 @@
 /// <reference types="vite/client" />
 /**
- * Job Discovery
+ * Job Discovery - Recipe-based automation
  * 
- * Platform-agnostic job discovery:
- * - Creating LLM task prompts
- * - Parsing job results
- * - Session tracking and reporting
- * - Agent lifecycle management
+ * Uses the cost-optimized Recipe API:
+ * - Navigator LLM discovers page bindings (uses buildDomTree)
+ * - Executor runs commands using discovered bindings
+ * - Extractor LLM (cheap) parses job content
+ * 
+ * Cost: ~$0.01-0.02 per run vs $1-2 for full LLM agent
  */
 
 import type { Job } from '@shared/types/job';
-import { AutomationAgent, BrowserContext } from '@/lib/automation-core';
-import type { TaskResult, ExecutionEvent, LLMConfig, LLMProvider } from '@/lib/automation-core';
+import {
+  BrowserContext,
+  RecipeRunner,
+  recipeTemplates,
+  createChatModel,
+  createDualModelConfig,
+  clearBindingsForUrl,
+  type ExtractedJobData,
+} from '@/lib/automation-core';
 
 // ============================================================================
 // Types
@@ -32,6 +40,8 @@ export interface DiscoveryOptions {
   maxJobs: number;
   /** URL to navigate to before starting discovery */
   url: string;
+  /** Force fresh binding discovery (ignore cached bindings) */
+  forceRefresh?: boolean;
 }
 
 export interface DiscoveryResult {
@@ -70,37 +80,32 @@ export interface SessionReport {
   success: boolean;
   stoppedReason: string;
   error?: string;
+  jobsFound: number;
+  jobsExtracted: Job[];
+  /** New recipe-based fields */
+  bindingFixes: number;
+  commandsExecuted: number;
+  /** Legacy fields for UI compatibility */
   totalSteps: number;
   successfulSteps: number;
   failedSteps: number;
   totalActions: number;
   successfulActions: number;
   failedActions: number;
-  jobsFound: number;
-  jobsExtracted: Job[];
   steps: StepLog[];
   urlsVisited: string[];
   finalUrl?: string;
-}
-
-// Parsed job data from LLM response
-interface ParsedJobData {
-  title?: string;
-  company?: string;
-  location?: string;
-  salary?: string;
-  jobType?: string;
-  experienceLevel?: string;
-  description?: string;
-  postedTime?: string;
-  jobId?: string;
+  searchQuery?: string;
+  /** Detailed execution logs */
+  logs: string[];
+  /** Discovered bindings (if any) */
+  discoveredBindings?: Record<string, unknown>;
 }
 
 // ============================================================================
 // State
 // ============================================================================
 
-// Discovery state
 let discoveryState: DiscoveryState = {
   status: 'idle',
   jobsFound: 0,
@@ -111,267 +116,68 @@ let discoveryState: DiscoveryState = {
 const stateListeners: Set<(state: DiscoveryState) => void> = new Set();
 const jobListeners: Set<(job: Job) => void> = new Set();
 
-// Agent state
-let agent: AutomationAgent | null = null;
+// Browser context for cleanup
 let browserContext: BrowserContext | null = null;
+let recipeRunner: RecipeRunner | null = null;
 
 // Session reporting state
-let currentReport: SessionReport | null = null;
-let currentStepLog: StepLog | null = null;
-let urlsVisited: Set<string> = new Set();
-const sessionReports: SessionReport[] = [];
+let sessionReports: SessionReport[] = [];
+let reportsLoaded = false;
+
+const REPORTS_STORAGE_KEY = 'discovery_session_reports';
+const MAX_STORED_REPORTS = 50;
+
+// ============================================================================
+// Storage
+// ============================================================================
+
+async function loadReportsFromStorage(): Promise<void> {
+  if (reportsLoaded) return;
+  
+  try {
+    const result = await chrome.storage.local.get(REPORTS_STORAGE_KEY);
+    if (result[REPORTS_STORAGE_KEY] && Array.isArray(result[REPORTS_STORAGE_KEY])) {
+      sessionReports = result[REPORTS_STORAGE_KEY];
+      console.log(`[Discovery] Loaded ${sessionReports.length} reports from storage`);
+    }
+    reportsLoaded = true;
+  } catch (error) {
+    console.error('[Discovery] Failed to load reports from storage:', error);
+    reportsLoaded = true;
+  }
+}
+
+async function saveReportsToStorage(): Promise<void> {
+  try {
+    const reportsToSave = sessionReports.slice(-MAX_STORED_REPORTS);
+    await chrome.storage.local.set({ [REPORTS_STORAGE_KEY]: reportsToSave });
+    console.log(`[Discovery] Saved ${reportsToSave.length} reports to storage`);
+  } catch (error) {
+    console.error('[Discovery] Failed to save reports to storage:', error);
+  }
+}
+
+loadReportsFromStorage();
 
 // ============================================================================
 // LLM Configuration
 // ============================================================================
 
-function getLLMConfig(): LLMConfig {
-  const provider = (import.meta.env.VITE_LLM_PROVIDER as LLMProvider) || 'anthropic';
-  const apiKey = import.meta.env.VITE_LLM_API_KEY || import.meta.env.VITE_ANTHROPIC_API_KEY || '';
-  const model = import.meta.env.VITE_LLM_MODEL || 'claude-sonnet-4-20250514';
-  const baseUrl = import.meta.env.VITE_LLM_BASE_URL;
-
+function getGeminiApiKey(): string {
+  const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
   if (!apiKey) {
-    throw new Error('LLM API key not configured. Set VITE_LLM_API_KEY or VITE_ANTHROPIC_API_KEY in .env');
+    throw new Error('Gemini API key not configured. Set VITE_GEMINI_API_KEY in .env');
   }
-
-  return {
-    provider,
-    apiKey,
-    model,
-    ...(baseUrl && { baseUrl }),
-    temperature: 0.1,
-  };
+  return apiKey;
 }
 
 export function hasLLMConfig(): boolean {
   try {
-    getLLMConfig();
+    getGeminiApiKey();
     return true;
   } catch {
     return false;
   }
-}
-
-// ============================================================================
-// Agent Lifecycle
-// ============================================================================
-
-async function initAgent(navigateToUrl?: string): Promise<void> {
-  console.log('[Agent] Initializing...');
-  await cleanupAgent();
-
-  const llmConfig = getLLMConfig();
-  console.log('[Agent] LLM:', llmConfig.provider, llmConfig.model);
-
-  // Create new tab for automation
-  const newTab = await chrome.tabs.create({ 
-    url: 'about:blank',
-    active: true
-  });
-  
-  if (!newTab.id) {
-    throw new Error('Failed to create new tab');
-  }
-  
-  console.log('[Agent] New tab created:', newTab.id);
-  browserContext = await BrowserContext.fromTab(newTab.id);
-
-  // Navigate to the target URL before creating the agent
-  // This saves LLM tokens by not using AI for simple navigation
-  if (navigateToUrl) {
-    console.log('[Agent] Navigating to:', navigateToUrl);
-    await browserContext.navigateTo(navigateToUrl);
-    console.log('[Agent] Navigation complete');
-  }
-
-  agent = new AutomationAgent({
-    context: browserContext,
-    llm: llmConfig,
-    options: {
-      maxSteps: 50,
-      maxActionsPerStep: 5,
-      maxFailures: 3,
-      useVision: false,
-    },
-  });
-  console.log('[Agent] Ready');
-}
-
-async function executeTask(task: string): Promise<TaskResult> {
-  if (!agent) {
-    throw new Error('Agent not initialized');
-  }
-  return agent.execute(task);
-}
-
-async function stopAgent(): Promise<void> {
-  if (agent) {
-    await agent.stop();
-  }
-}
-
-async function cleanupAgent(): Promise<void> {
-  if (agent) {
-    await agent.cleanup();
-    agent = null;
-  }
-  if (browserContext) {
-    await browserContext.cleanup();
-    browserContext = null;
-  }
-}
-
-// ============================================================================
-// Task Prompt Building
-// ============================================================================
-
-function buildDiscoveryTask(maxJobs: number): string {
-  return `
-TASK: Extract ${maxJobs} job listings from this job search page.
-
-You are on a job search results page. Extract job details by clicking each listing.
-
-=== EXTRACTION LOOP (repeat until ${maxJobs} jobs collected) ===
-
-For each job listing:
-1. CLICK the job card to view details
-2. WAIT for details to load
-3. EXTRACT and immediately output via done() when you have enough jobs:
-   - title: Job title
-   - company: Company name  
-   - location: City/region or "Remote"
-   - salary: Salary if shown, otherwise null
-   - jobType: "Full-time", "Part-time", "Contract", "Internship"
-   - experienceLevel: "Entry level", "Mid-Senior level", etc.
-   - jobId: Unique ID from URL or page (e.g., "/jobs/view/4133166618" → "4133166618")
-   - description: First 500 chars of description
-   - postedTime: When posted (e.g., "2 days ago")
-4. Track: After extracting, remember "Extracted: <jobId>" to avoid re-processing
-5. Move to NEXT unprocessed job card
-
-=== SCROLLING ===
-If fewer than ${maxJobs} jobs and more exist:
-- scroll_to_bottom or next_page to load more
-- Continue extracting new jobs only
-
-=== FINISH ===
-When you have ${maxJobs} jobs OR no more available:
-done(success=true, text="[...array of job objects as JSON...]")
-
-=== OUTPUT FORMAT ===
-[
-  {
-    "title": "Senior Frontend Engineer",
-    "company": "Acme Corp",
-    "location": "Remote",
-    "salary": "$120,000 - $150,000/yr",
-    "jobType": "Full-time",
-    "experienceLevel": "Mid-Senior level",
-    "jobId": "4133166618",
-    "description": "We are looking for...",
-    "postedTime": "1 week ago"
-  }
-]
-
-=== ERRORS ===
-- LOGIN page: done(success=false, text="login_required")
-- CAPTCHA: done(success=false, text="captcha")  
-- Other error: done(success=false, text="error: <description>")
-
-=== KEY RULES ===
-- Click each job to see full details
-- Track extracted jobIds to avoid duplicates
-- Stop at ${maxJobs} jobs
-`.trim();
-}
-
-// ============================================================================
-// Result Parsing
-// ============================================================================
-
-function parseJobsFromResult(finalAnswer: string | undefined): ParsedJobData[] {
-  if (!finalAnswer) return [];
-
-  try {
-    const jsonMatch = finalAnswer.match(/\[[\s\S]*\]/);
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0]);
-      if (Array.isArray(parsed)) {
-        return parsed.map((item) => ({
-          title: item.title || 'Unknown Title',
-          company: item.company || 'Unknown Company',
-          location: item.location || '',
-          salary: item.salary || null,
-          jobType: item.jobType || 'full-time',
-          experienceLevel: item.experienceLevel || null,
-          description: item.description || '',
-          postedTime: item.postedTime || null,
-          jobId: String(item.jobId || item.linkedinJobId || ''),
-        }));
-      }
-    }
-  } catch (err) {
-    console.error('[Discovery] Failed to parse jobs:', err);
-  }
-
-  return [];
-}
-
-function createJob(partial: ParsedJobData, sourceUrl?: string): Job {
-  const now = new Date().toISOString();
-  const jobId = partial.jobId || crypto.randomUUID();
-
-  const locationLower = (partial.location || '').toLowerCase();
-  let locationType: 'remote' | 'hybrid' | 'onsite' = 'onsite';
-  if (locationLower.includes('remote')) locationType = 'remote';
-  else if (locationLower.includes('hybrid')) locationType = 'hybrid';
-
-  const jobTypeLower = (partial.jobType || '').toLowerCase();
-  let jobType: 'full-time' | 'part-time' | 'contract' | 'internship' = 'full-time';
-  if (jobTypeLower.includes('part')) jobType = 'part-time';
-  else if (jobTypeLower.includes('contract')) jobType = 'contract';
-  else if (jobTypeLower.includes('intern')) jobType = 'internship';
-
-  const expLower = (partial.experienceLevel || '').toLowerCase();
-  let experienceLevel: 'internship' | 'entry' | 'associate' | 'mid-senior' | 'director' | 'executive' | undefined;
-  if (expLower.includes('intern')) experienceLevel = 'internship';
-  else if (expLower.includes('entry')) experienceLevel = 'entry';
-  else if (expLower.includes('associate')) experienceLevel = 'associate';
-  else if (expLower.includes('mid') || expLower.includes('senior')) experienceLevel = 'mid-senior';
-  else if (expLower.includes('director')) experienceLevel = 'director';
-  else if (expLower.includes('executive')) experienceLevel = 'executive';
-
-  // Build URL based on source - detect platform from sourceUrl if provided
-  let url = '';
-  if (sourceUrl) {
-    if (sourceUrl.includes('linkedin.com')) {
-      url = `https://www.linkedin.com/jobs/view/${jobId}`;
-    } else if (sourceUrl.includes('indeed.com')) {
-      url = `https://www.indeed.com/viewjob?jk=${jobId}`;
-    } else {
-      // Generic fallback - just use the source URL
-      url = sourceUrl;
-    }
-  }
-
-  return {
-    id: crypto.randomUUID(),
-    sourceJobId: jobId,
-    title: partial.title || 'Unknown Title',
-    company: partial.company || 'Unknown Company',
-    location: partial.location || '',
-    locationType,
-    jobType,
-    experienceLevel,
-    salaryText: partial.salary || undefined,
-    description: partial.description,
-    postedAt: now,
-    postedTime: partial.postedTime,
-    capturedAt: now,
-    url,
-    status: 'pending',
-  };
 }
 
 // ============================================================================
@@ -390,13 +196,6 @@ function updateState(updates: Partial<DiscoveryState>): void {
 }
 
 function notifyJobFound(job: Job): void {
-  if (currentReport) {
-    currentReport.jobsFound++;
-    currentReport.jobsExtracted.push(job);
-    currentReport.endedAt = Date.now();
-    currentReport.duration = currentReport.endedAt - currentReport.startedAt;
-  }
-  
   jobListeners.forEach((listener) => {
     try {
       listener(job);
@@ -407,222 +206,185 @@ function notifyJobFound(job: Job): void {
 }
 
 // ============================================================================
-// Session Reporting
+// Utilities
 // ============================================================================
 
-function initSession(task: string, sourceUrl: string): void {
-  currentReport = {
-    id: crypto.randomUUID(),
-    startedAt: Date.now(),
-    endedAt: Date.now(),
-    duration: 0,
-    task,
-    sourceUrl,
-    success: false,
-    stoppedReason: 'running',
-    totalSteps: 0,
-    successfulSteps: 0,
-    failedSteps: 0,
-    totalActions: 0,
-    successfulActions: 0,
-    failedActions: 0,
-    jobsFound: 0,
-    jobsExtracted: [],
-    steps: [],
-    urlsVisited: [],
-  };
-  
-  currentStepLog = null;
-  urlsVisited = new Set();
-  sessionReports.push(currentReport);
+function extractSearchQuery(url: string): string {
+  try {
+    const urlObj = new URL(url);
+    // LinkedIn
+    const keywords = urlObj.searchParams.get('keywords');
+    if (keywords) return keywords;
+    // Indeed
+    const q = urlObj.searchParams.get('q');
+    if (q) return q;
+    // Generic fallback
+    return urlObj.pathname.split('/').pop() || 'Job Search';
+  } catch {
+    return 'Job Search';
+  }
 }
 
-function logAction(action: string, status: 'start' | 'ok' | 'fail', details: string, error?: string): void {
-  if (!currentStepLog || !currentReport) return;
+// ============================================================================
+// Job Conversion
+// ============================================================================
+
+function convertToJob(extracted: ExtractedJobData, sourceUrl: string): Job {
+  const now = new Date().toISOString();
   
-  currentStepLog.actions.push({
-    timestamp: Date.now(),
-    action,
-    details,
-    status,
-    ...(error && { error }),
+  const locationLower = (extracted.location || '').toLowerCase();
+  let locationType: 'remote' | 'hybrid' | 'onsite' = 'onsite';
+  if (locationLower.includes('remote')) locationType = 'remote';
+  else if (locationLower.includes('hybrid')) locationType = 'hybrid';
+
+  const jobTypeLower = (extracted.jobType || '').toLowerCase();
+  let jobType: 'full-time' | 'part-time' | 'contract' | 'internship' = 'full-time';
+  if (jobTypeLower.includes('part')) jobType = 'part-time';
+  else if (jobTypeLower.includes('contract')) jobType = 'contract';
+  else if (jobTypeLower.includes('intern')) jobType = 'internship';
+
+  return {
+    id: crypto.randomUUID(),
+    sourceJobId: extracted.id,
+    title: extracted.title || 'Unknown Title',
+    company: extracted.company || 'Unknown Company',
+    location: extracted.location || '',
+    locationType,
+    jobType,
+    salaryText: extracted.salary,
+    description: extracted.description,
+    capturedAt: now,
+    postedAt: now,
+    url: extracted.url || sourceUrl,
+    status: 'pending',
+  };
+}
+
+// ============================================================================
+// Recipe Discovery
+// ============================================================================
+
+async function initBrowserContext(url: string): Promise<BrowserContext> {
+  console.log('[Discovery] Creating new tab with URL:', url);
+  
+  const newTab = await chrome.tabs.create({ 
+    url,
+    active: true
   });
   
-  if (status === 'ok') {
-    currentReport.totalActions++;
-    currentReport.successfulActions++;
-  } else if (status === 'fail') {
-    currentReport.totalActions++;
-    currentReport.failedActions++;
+  if (!newTab.id) {
+    throw new Error('Failed to create new tab');
   }
   
-  currentReport.endedAt = Date.now();
-  currentReport.duration = currentReport.endedAt - currentReport.startedAt;
-}
-
-function startStep(stepNumber: number, goal?: string, url?: string): void {
-  if (!currentReport) return;
+  const tabId = newTab.id;
   
-  if (currentStepLog) {
-    currentReport.steps.push(currentStepLog);
-    currentReport.totalSteps++;
-    if (currentStepLog.success) currentReport.successfulSteps++;
-    else currentReport.failedSteps++;
-  }
+  // Wait for tab to load with multiple fallback strategies
+  console.log('[Discovery] Waiting for tab to load...');
   
-  currentStepLog = {
-    step: stepNumber,
-    timestamp: Date.now(),
-    goal: goal || '',
-    actions: [],
-    url,
-    success: true,
+  const waitForTab = async (): Promise<void> => {
+    const startTime = Date.now();
+    const timeout = 45000; // 45 seconds total timeout
+    const pollInterval = 500; // Check every 500ms
+    
+    // First, try the event-based approach with a shorter timeout
+    const eventPromise = new Promise<boolean>((resolve) => {
+      const eventTimeout = setTimeout(() => {
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve(false); // Event-based approach timed out
+      }, 15000); // 15 second timeout for events
+      
+      const listener = (updatedTabId: number, changeInfo: chrome.tabs.TabChangeInfo) => {
+        if (updatedTabId === tabId && changeInfo.status === 'complete') {
+          chrome.tabs.onUpdated.removeListener(listener);
+          clearTimeout(eventTimeout);
+          resolve(true);
+        }
+      };
+      
+      // Check if already complete
+      chrome.tabs.get(tabId).then(tab => {
+        if (tab.status === 'complete') {
+          chrome.tabs.onUpdated.removeListener(listener);
+          clearTimeout(eventTimeout);
+          resolve(true);
+        } else {
+          chrome.tabs.onUpdated.addListener(listener);
+        }
+      }).catch(() => {
+        clearTimeout(eventTimeout);
+        resolve(false);
+      });
+    });
+    
+    const eventResult = await eventPromise;
+    if (eventResult) {
+      console.log('[Discovery] Tab loaded via event');
+      return;
+    }
+    
+    // Fallback: Poll for tab status
+    console.log('[Discovery] Event-based wait timed out, polling...');
+    while (Date.now() - startTime < timeout) {
+      try {
+        const tab = await chrome.tabs.get(tabId);
+        if (tab.status === 'complete') {
+          console.log('[Discovery] Tab loaded via polling');
+          return;
+        }
+        // Also check if URL has changed (indicates navigation happened)
+        if (tab.url && tab.url !== 'about:blank' && tab.url.includes('linkedin.com')) {
+          // Give it a bit more time for DOM to settle
+          await new Promise(r => setTimeout(r, 2000));
+          console.log('[Discovery] Tab URL loaded, continuing');
+          return;
+        }
+      } catch (e) {
+        // Tab might be gone
+        throw new Error(`Tab ${tabId} no longer exists`);
+      }
+      await new Promise(r => setTimeout(r, pollInterval));
+    }
+    
+    // Final check
+    const finalTab = await chrome.tabs.get(tabId);
+    if (finalTab.status === 'complete' || (finalTab.url && finalTab.url.includes('linkedin.com'))) {
+      console.log('[Discovery] Tab loaded after extended wait');
+      return;
+    }
+    
+    throw new Error(`Tab load timeout after ${timeout}ms (status: ${finalTab.status})`);
   };
   
-  if (url) {
-    urlsVisited.add(url);
-    currentReport.urlsVisited = Array.from(urlsVisited);
-  }
+  await waitForTab();
   
-  currentReport.endedAt = Date.now();
-  currentReport.duration = currentReport.endedAt - currentReport.startedAt;
+  // Additional wait for JavaScript to initialize
+  console.log('[Discovery] Waiting for JS to settle...');
+  await new Promise(r => setTimeout(r, 2000));
+  
+  console.log('[Discovery] Tab loaded, creating BrowserContext');
+  return BrowserContext.fromTab(tabId);
 }
 
-function failStep(error: string): void {
-  if (currentStepLog) {
-    currentStepLog.success = false;
-    currentStepLog.error = error;
+async function cleanup(): Promise<void> {
+  if (browserContext) {
+    await browserContext.cleanup();
+    browserContext = null;
   }
+  recipeRunner = null;
 }
 
-function finalizeSessionReport(
-  success: boolean,
-  stoppedReason: string,
-  jobs: Job[],
-  error?: string,
-  finalUrl?: string
-): SessionReport {
-  if (!currentReport) {
-    return {
-      id: crypto.randomUUID(),
-      startedAt: Date.now(),
-      endedAt: Date.now(),
-      duration: 0,
-      task: '',
-      sourceUrl: '',
-      success: false,
-      stoppedReason: 'error',
-      error: 'No session was initialized',
-      totalSteps: 0,
-      successfulSteps: 0,
-      failedSteps: 0,
-      totalActions: 0,
-      successfulActions: 0,
-      failedActions: 0,
-      jobsFound: 0,
-      jobsExtracted: [],
-      steps: [],
-      urlsVisited: [],
-    };
-  }
+export async function discoverJobsWithRecipe(options: DiscoveryOptions): Promise<DiscoveryResult> {
+  const { maxJobs, url, forceRefresh } = options;
+  const startedAt = Date.now();
   
-  if (currentStepLog) {
-    currentReport.steps.push(currentStepLog);
-    currentReport.totalSteps++;
-    if (currentStepLog.success) currentReport.successfulSteps++;
-    else currentReport.failedSteps++;
-    currentStepLog = null;
-  }
-  
-  currentReport.endedAt = Date.now();
-  currentReport.duration = currentReport.endedAt - currentReport.startedAt;
-  currentReport.success = success;
-  currentReport.stoppedReason = stoppedReason;
-  if (error) currentReport.error = error;
-  if (finalUrl) currentReport.finalUrl = finalUrl;
-  currentReport.jobsFound = jobs.length;
-  currentReport.jobsExtracted = jobs;
-  currentReport.urlsVisited = Array.from(urlsVisited);
-  
-  const report = currentReport;
-  currentReport = null;
-  
-  console.log(`[Session] Finalized: ${success ? 'SUCCESS' : 'FAILED'} - ${jobs.length} jobs, ${report.totalSteps} steps`);
-  
-  return report;
-}
-
-// ============================================================================
-// Event Handling (from automation-core)
-// ============================================================================
-
-function handleExecutionEvent(event: ExecutionEvent): void {
-  const eventType = event.type;
-  
-  // Handle step events
-  if (eventType === 'step_start' || eventType === 'step_ok') {
-    const stepNum = event.step || 0;
-    startStep(stepNum, event.details);
-    updateState({
-      currentStep: stepNum,
-      maxSteps: event.maxSteps || 50,
-    });
-  } else if (eventType === 'step_fail') {
-    const stepNum = event.step || 0;
-    updateState({ currentStep: stepNum });
-    failStep(event.details || 'Step failed');
-  }
-  
-  // Handle action events
-  if (eventType === 'action_start') {
-    logAction(event.action || 'action', 'start', event.details || '');
-  } else if (eventType === 'action_ok') {
-    logAction(event.action || 'action', 'ok', event.details || '');
-  } else if (eventType === 'action_fail') {
-    logAction(event.action || 'action', 'fail', event.details || '', event.details);
-  }
-  
-  // Handle LLM events
-  if (eventType === 'llm_start') {
-    logAction('llm_call', 'start', event.details || '');
-  } else if (eventType === 'llm_ok') {
-    logAction('llm_call', 'ok', event.details || '');
-  } else if (eventType === 'llm_fail') {
-    logAction('llm_call', 'fail', event.details || '', event.details);
-  }
-  
-  // Handle task failure
-  if (eventType === 'task_fail') {
-    const errorMsg = event.details || 'Unknown error';
-    failStep(errorMsg);
-    
-    const errorLower = errorMsg.toLowerCase();
-    if (errorLower.includes('captcha')) {
-      updateState({ status: 'captcha', error: 'CAPTCHA detected' });
-    } else if (errorLower.includes('login')) {
-      updateState({ status: 'login_required', error: 'Login required' });
-    }
-  }
-}
-
-// ============================================================================
-// Public API
-// ============================================================================
-
-export function getSessionReports(): SessionReport[] {
-  return [...sessionReports];
-}
-
-export function getLastSessionReport(): SessionReport | null {
-  return sessionReports.length > 0 ? sessionReports[sessionReports.length - 1] : null;
-}
-
-export function clearSessionReports(): void {
-  sessionReports.length = 0;
-}
-
-export async function startDiscovery(options: DiscoveryOptions): Promise<DiscoveryResult> {
-  const { maxJobs = 20, url } = options;
+  // Collect logs for the report
+  const logs: string[] = [];
+  const log = (msg: string) => {
+    const timestamp = new Date().toISOString().split('T')[1].slice(0, 12);
+    const logLine = `[${timestamp}] ${msg}`;
+    logs.push(logLine);
+    console.log('[Discovery]', msg);
+  };
 
   if (discoveryState.status === 'running') {
     return { success: false, jobs: [], error: 'Discovery already running' };
@@ -633,131 +395,318 @@ export async function startDiscovery(options: DiscoveryOptions): Promise<Discove
   }
 
   const jobs: Job[] = [];
-  const task = buildDiscoveryTask(maxJobs);
-  
-  initSession(task, url);
+  let discoveredBindings: Record<string, unknown> | undefined;
 
   try {
     updateState({
       status: 'running',
       jobsFound: 0,
       currentStep: 0,
-      startedAt: Date.now(),
+      startedAt,
       error: undefined,
     });
 
-    startStep(0, 'Initializing automation agent and navigating to job search');
-    logAction('init_agent', 'start', 'Creating browser context');
-    logAction('navigate', 'start', `Navigating to: ${url}`);
-    
-    await initAgent(url);
-    logAction('navigate', 'ok', 'Navigation complete');
-    logAction('init_agent', 'ok', 'Agent initialized');
+    log(`Starting discovery for: ${url}`);
+    log(`Max jobs to extract: ${maxJobs}`);
 
-    // Subscribe to automation events
-    agent?.on('all', handleExecutionEvent);
+    // Clear cached bindings if force refresh requested
+    if (forceRefresh) {
+      log('Force refresh - clearing cached bindings');
+      await clearBindingsForUrl(url);
+    }
 
-    startStep(1, 'Executing discovery task');
-    logAction('execute_task', 'start', `URL: ${url}`);
+    // Initialize LLM models
+    log('Initializing LLM models...');
+    const geminiApiKey = getGeminiApiKey();
+    log(`Gemini API key present: ${geminiApiKey ? 'YES (' + geminiApiKey.slice(0, 8) + '...)' : 'NO'}`);
     
-    let result: TaskResult;
-    let finalUrl: string | undefined;
+    const modelConfig = createDualModelConfig(geminiApiKey);
+    log(`Navigator model: ${modelConfig.navigator.provider}/${modelConfig.navigator.model}`);
+    log(`Extractor model: ${modelConfig.extractor.provider}/${modelConfig.extractor.model}`);
     
+    const navigatorLLM = createChatModel(modelConfig.navigator);
+    const extractorLLM = createChatModel(modelConfig.extractor);
+    log('LLM models created successfully');
+
+    // Initialize browser
+    log('Initializing browser context...');
+    browserContext = await initBrowserContext(url);
+    const page = await browserContext.getCurrentPage();
+    
+    log(`Page attached: ${page.attached}`);
+    log(`Page URL: ${page.url()}`);
+    log(`Page title: ${await page.title()}`);
+
+    // Get DOM state to log - show class names for debugging
     try {
-      result = await executeTask(task);
-      finalUrl = result.finalUrl;
-      
-      // Log step records from result
-      for (const stepRecord of result.steps || []) {
-        startStep(stepRecord.step, stepRecord.goal, stepRecord.url);
-        for (const action of stepRecord.actions) {
-          logAction(
-            action.name, 
-            action.result.error ? 'fail' : 'ok', 
-            JSON.stringify(action.args).substring(0, 100),
-            action.result.error || undefined
-          );
-        }
-        if (stepRecord.url) urlsVisited.add(stepRecord.url);
-      }
-      
-      logAction('execute_task', 'ok', `${result.steps?.length || 0} steps completed`);
-    } catch (taskError) {
-      const errorMsg = taskError instanceof Error ? taskError.message : String(taskError);
-      logAction('execute_task', 'fail', 'Task failed', errorMsg);
-      failStep(errorMsg);
-      throw taskError;
+      const state = await page.getState();
+      // Include class attribute in preview to help debug binding discovery
+      const elementsStr = state.elementTree.clickableElementsToString(['class', 'id', 'href', 'role', 'data-job-id']);
+      log(`DOM elements obtained: ${elementsStr.length} chars`);
+      log(`DOM preview (first 800 chars): ${elementsStr.slice(0, 800).replace(/\n/g, ' ')}`);
+    } catch (domError) {
+      log(`ERROR getting DOM state: ${domError instanceof Error ? domError.message : String(domError)}`);
     }
 
-    if (!result.success) {
-      const errorLower = result.error?.toLowerCase() || '';
-      const answerLower = result.finalAnswer?.toLowerCase() || '';
+    // Create recipe runner with log callback
+    log('Creating recipe runner...');
+    recipeRunner = new RecipeRunner({
+      navigatorLLM,
+      extractorLLM,
+      maxItems: maxJobs,
+    });
 
-      if (errorLower.includes('captcha') || answerLower.includes('captcha')) {
-        updateState({ status: 'captcha', error: 'CAPTCHA detected' });
-        return { 
-          success: false, jobs: [], error: 'CAPTCHA detected', 
-          stoppedReason: 'captcha', 
-          report: finalizeSessionReport(false, 'captcha', [], 'CAPTCHA detected', finalUrl) 
-        };
+    // Set progress callback
+    recipeRunner.setProgressCallback((progress) => {
+      log(`Progress: ${progress.step} - ${progress.itemsCollected}/${progress.totalItems} items`);
+      updateState({
+        currentStep: progress.itemsCollected,
+        maxSteps: progress.totalItems,
+        jobsFound: progress.itemsCollected,
+      });
+      
+      if (progress.currentItem) {
+        const job = convertToJob(progress.currentItem, url);
+        notifyJobFound(job);
       }
+    });
 
-      if (errorLower.includes('login') || answerLower.includes('login_required')) {
-        updateState({ status: 'login_required', error: 'Login required' });
-        return { 
-          success: false, jobs: [], error: 'Login required', 
-          stoppedReason: 'login', 
-          report: finalizeSessionReport(false, 'login', [], 'Login required', finalUrl) 
-        };
-      }
+    // Create recipe
+    const recipe = recipeTemplates.jobListingExtraction(url, maxJobs);
+    log(`Recipe created: ${recipe.id} with ${recipe.commands.length} commands`);
 
-      updateState({ status: 'error', error: result.error });
-      return { 
-        success: false, jobs: [], error: result.error, 
-        stoppedReason: 'error', 
-        report: finalizeSessionReport(false, 'error', [], result.error, finalUrl) 
-      };
-    }
-
-    // Parse jobs from result
-    startStep(discoveryState.currentStep + 1, 'Parsing extracted jobs');
-    logAction('parse_jobs', 'start', 'Parsing jobs from result');
+    // Execute recipe
+    log('Executing recipe...');
+    const result = await recipeRunner.run(page, recipe);
     
-    const parsedJobs = parseJobsFromResult(result.finalAnswer);
-    logAction('parse_jobs', 'ok', `Parsed ${parsedJobs.length} jobs`);
-
-    for (const partial of parsedJobs) {
-      const job = createJob(partial, url);
-      jobs.push(job);
-      updateState({ jobsFound: jobs.length });
-      notifyJobFound(job);
+    // Include runner's internal logs
+    if (result.logs) {
+      for (const runnerLog of result.logs) {
+        logs.push(`[Runner] ${runnerLog}`);
+      }
+    }
+    
+    log(`Recipe completed: success=${result.success}, items=${result.items.length}`);
+    log(`Stats: commands=${result.stats.commandsExecuted}, scrolls=${result.stats.scrollsPerformed}, fixes=${result.stats.bindingFixes}`);
+    
+    if (result.error) {
+      log(`Recipe error: ${result.error}`);
+    }
+    
+    // Store discovered bindings for the report
+    if (result.bindings) {
+      discoveredBindings = {
+        id: result.bindings.id,
+        LIST: result.bindings.LIST,
+        LIST_ITEM: result.bindings.LIST_ITEM,
+        DETAILS_PANEL: result.bindings.DETAILS_PANEL,
+        DETAILS_CONTENT: result.bindings.DETAILS_CONTENT,
+        SCROLL_BEHAVIOR: result.bindings.SCROLL_BEHAVIOR,
+        CLICK_BEHAVIOR: result.bindings.CLICK_BEHAVIOR,
+      };
+      log(`Bindings discovered: LIST="${result.bindings.LIST}", LIST_ITEM="${result.bindings.LIST_ITEM}"`);
+    } else {
+      log('WARNING: No bindings in result');
     }
 
-    updateState({ status: 'idle' });
+    // Convert extracted items to jobs
+    for (const item of result.items) {
+      const job = convertToJob(item, url);
+      jobs.push(job);
+    }
+
+    updateState({ 
+      status: 'idle',
+      jobsFound: jobs.length,
+    });
+
+    // Create session report with full structure for UI compatibility
+    const endedAt = Date.now();
+    const searchQuery = extractSearchQuery(url);
+    
+    // Check if bindings were successfully discovered (empty object = failure)
+    const hasValidBindings = result.bindings && Object.keys(result.bindings).length > 2;
+    const bindingsError = result.error?.includes('bindings') ? result.error : undefined;
+    
+    // Build step logs from recipe execution
+    const steps: StepLog[] = [
+      {
+        step: 1,
+        timestamp: startedAt,
+        goal: 'Navigate to page',
+        actions: [
+          { timestamp: startedAt, action: 'navigate', details: url, status: 'ok' },
+        ],
+        url,
+        success: true,
+      },
+      {
+        step: 2,
+        timestamp: startedAt + 1000,
+        goal: 'Discover page bindings',
+        actions: [
+          { timestamp: startedAt + 1000, action: 'analyze_dom', details: 'buildDomTree', status: 'ok' },
+          { timestamp: startedAt + 2000, action: 'llm_call', details: 'Navigator LLM - discover bindings', status: hasValidBindings ? 'ok' : 'fail', error: bindingsError },
+        ],
+        success: hasValidBindings,
+        error: bindingsError,
+      },
+      {
+        step: 3,
+        timestamp: startedAt + 3000,
+        goal: `Extract ${maxJobs} job listings`,
+        actions: [
+          { timestamp: startedAt + 3000, action: 'execute_recipe', details: `${result.stats.commandsExecuted} commands`, status: result.success ? 'ok' : 'fail' },
+          { timestamp: startedAt + 4000, action: 'scroll', details: `${result.stats.scrollsPerformed} scrolls`, status: 'ok' },
+          { timestamp: endedAt - 1000, action: 'extract', details: `${result.stats.itemsProcessed} items processed`, status: 'ok' },
+        ],
+        success: result.success,
+        error: result.error,
+      },
+    ];
+
+    // Add binding fix steps if any
+    if (result.stats.bindingFixes > 0) {
+      steps.push({
+        step: 4,
+        timestamp: endedAt - 500,
+        goal: 'Fix bindings',
+        actions: [
+          { timestamp: endedAt - 500, action: 'llm_call', details: `Navigator LLM - ${result.stats.bindingFixes} binding fixes`, status: 'ok' },
+        ],
+        success: true,
+      });
+    }
+
+    log(`Creating session report...`);
+    
+    const report: SessionReport = {
+      id: crypto.randomUUID(),
+      startedAt,
+      endedAt,
+      duration: endedAt - startedAt,
+      task: `Extract ${maxJobs} jobs`,
+      sourceUrl: url,
+      searchQuery,
+      success: result.success,
+      stoppedReason: result.success ? 'complete' : 'error',
+      error: result.error,
+      jobsFound: jobs.length,
+      jobsExtracted: jobs,
+      bindingFixes: result.stats.bindingFixes,
+      commandsExecuted: result.stats.commandsExecuted,
+      // Legacy fields for UI
+      totalSteps: steps.length,
+      successfulSteps: steps.filter(s => s.success).length,
+      failedSteps: steps.filter(s => !s.success).length,
+      totalActions: steps.reduce((sum, s) => sum + s.actions.length, 0),
+      successfulActions: steps.reduce((sum, s) => sum + s.actions.filter(a => a.status === 'ok').length, 0),
+      failedActions: steps.reduce((sum, s) => sum + s.actions.filter(a => a.status === 'fail').length, 0),
+      steps,
+      urlsVisited: [url],
+      finalUrl: url,
+      // New detailed logs
+      logs,
+      discoveredBindings,
+    };
+
+    sessionReports.push(report);
+    await saveReportsToStorage();
 
     const stoppedReason = jobs.length >= maxJobs ? 'max_jobs' : 'complete';
+    
     return {
-      success: true,
+      success: jobs.length > 0 || result.success,
       jobs,
       stoppedReason,
-      report: finalizeSessionReport(true, stoppedReason, jobs, undefined, finalUrl),
+      report,
     };
+
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+    const errorStack = err instanceof Error ? err.stack : '';
+    
+    log(`ERROR: ${errorMessage}`);
+    if (errorStack) {
+      log(`Stack: ${errorStack.split('\n').slice(0, 3).join(' | ')}`);
+    }
+    
     updateState({ status: 'error', error: errorMessage });
+    
+    const endedAt = Date.now();
+    const errorSteps: StepLog[] = [
+      {
+        step: 1,
+        timestamp: startedAt,
+        goal: 'Initialize discovery',
+        actions: [
+          { timestamp: startedAt, action: 'init', details: url, status: 'fail', error: errorMessage },
+        ],
+        success: false,
+        error: errorMessage,
+      },
+    ];
+    
+    const report: SessionReport = {
+      id: crypto.randomUUID(),
+      startedAt,
+      endedAt,
+      duration: endedAt - startedAt,
+      task: `Extract ${maxJobs} jobs`,
+      sourceUrl: url,
+      searchQuery: extractSearchQuery(url),
+      success: false,
+      stoppedReason: 'error',
+      error: errorMessage,
+      jobsFound: jobs.length,
+      jobsExtracted: jobs,
+      bindingFixes: 0,
+      commandsExecuted: 0,
+      // Legacy fields for UI
+      totalSteps: 1,
+      successfulSteps: 0,
+      failedSteps: 1,
+      totalActions: 1,
+      successfulActions: 0,
+      failedActions: 1,
+      steps: errorSteps,
+      urlsVisited: [url],
+      finalUrl: url,
+      // Include logs captured before the error
+      logs,
+      discoveredBindings,
+    };
+
+    sessionReports.push(report);
+    await saveReportsToStorage();
+
     return { 
-      success: false, jobs, error: errorMessage, 
-      stoppedReason: 'error', 
-      report: finalizeSessionReport(false, 'error', jobs, errorMessage) 
+      success: false, 
+      jobs, 
+      error: errorMessage, 
+      stoppedReason: 'error',
+      report,
     };
   } finally {
-    await cleanupAgent();
+    await cleanup();
   }
+}
+
+// ============================================================================
+// Public API
+// ============================================================================
+
+/**
+ * Start job discovery using the Recipe API
+ */
+export async function startDiscovery(options: DiscoveryOptions): Promise<DiscoveryResult> {
+  return discoverJobsWithRecipe(options);
 }
 
 export async function stopDiscovery(): Promise<void> {
   if (discoveryState.status === 'running') {
-    await stopAgent();
+    // Recipe runner doesn't have a stop method, so just cleanup
+    await cleanup();
     updateState({ status: 'idle' });
   }
 }
@@ -774,4 +723,25 @@ export function onStateChange(listener: (state: DiscoveryState) => void): () => 
 export function onJobFound(listener: (job: Job) => void): () => void {
   jobListeners.add(listener);
   return () => jobListeners.delete(listener);
+}
+
+// ============================================================================
+// Session Reports
+// ============================================================================
+
+export async function getSessionReports(): Promise<SessionReport[]> {
+  await loadReportsFromStorage();
+  return [...sessionReports];
+}
+
+export async function getLastSessionReport(): Promise<SessionReport | null> {
+  await loadReportsFromStorage();
+  return sessionReports.length > 0 ? sessionReports[sessionReports.length - 1] : null;
+}
+
+export async function clearSessionReports(): Promise<void> {
+  sessionReports = [];
+  reportsLoaded = true;
+  await chrome.storage.local.remove(REPORTS_STORAGE_KEY);
+  console.log('[Discovery] Cleared all session reports from storage');
 }

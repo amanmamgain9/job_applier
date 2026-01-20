@@ -27,6 +27,13 @@ import { isUrlAllowed } from './util';
 
 const logger = createLogger('Page');
 
+/**
+ * Formats a DOMElementNode into a human-readable string for error messages
+ */
+function formatElementDesc(elementNode: DOMElementNode): string {
+  return `<${elementNode.tagName}> (index: ${elementNode.highlightIndex}, xpath: ${elementNode.xpath})`;
+}
+
 export function buildInitialState(tabId?: number, url?: string, title?: string): PageState {
   return {
     elementTree: new DOMElementNode({
@@ -359,7 +366,7 @@ export class Page {
     } else {
       const element = await this.locateElement(elementNode);
       if (!element) {
-        throw new Error(`Element: ${elementNode} not found`);
+        throw new Error(`Element not found: ${formatElementDesc(elementNode)}`);
       }
       await element.evaluate((el, yPercent) => {
         const scrollHeight = el.scrollHeight;
@@ -384,7 +391,7 @@ export class Page {
     } else {
       const element = await this.locateElement(elementNode);
       if (!element) {
-        throw new Error(`Element: ${elementNode} not found`);
+        throw new Error(`Element not found: ${formatElementDesc(elementNode)}`);
       }
       await element.evaluate(el => {
         el.scrollBy(0, -el.clientHeight);
@@ -402,7 +409,7 @@ export class Page {
     } else {
       const element = await this.locateElement(elementNode);
       if (!element) {
-        throw new Error(`Element: ${elementNode} not found`);
+        throw new Error(`Element not found: ${formatElementDesc(elementNode)}`);
       }
       await element.evaluate(el => {
         el.scrollBy(0, el.clientHeight);
@@ -543,7 +550,7 @@ export class Page {
     try {
       const element = await this.locateElement(elementNode);
       if (!element) {
-        throw new Error(`Element: ${elementNode} not found`);
+        throw new Error(`Element not found: ${formatElementDesc(elementNode)}`);
       }
 
       const tagName = await element.evaluate(el => el.tagName.toLowerCase());
@@ -581,7 +588,7 @@ export class Page {
 
       await this.waitForPageAndFramesLoad();
     } catch (error) {
-      const errorMsg = `Failed to input text into element: ${elementNode}. Error: ${error instanceof Error ? error.message : String(error)}`;
+      const errorMsg = `Failed to input text into element: ${formatElementDesc(elementNode)}. Error: ${error instanceof Error ? error.message : String(error)}`;
       logger.error(errorMsg);
       throw new Error(errorMsg);
     }
@@ -637,7 +644,7 @@ export class Page {
     try {
       const element = await this.locateElement(elementNode);
       if (!element) {
-        throw new Error(`Element: ${elementNode} not found`);
+        throw new Error(`Element not found: ${formatElementDesc(elementNode)}`);
       }
 
       await this._scrollIntoViewIfNeeded(element);
@@ -666,7 +673,7 @@ export class Page {
       }
     } catch (error) {
       throw new Error(
-        `Failed to click element: ${elementNode}. Error: ${error instanceof Error ? error.message : String(error)}`,
+        `Failed to click element: ${formatElementDesc(elementNode)}. Error: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
@@ -908,6 +915,214 @@ export class Page {
       return result.message;
     } catch (error) {
       throw new Error(`${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /**
+   * Evaluate if a CSS selector exists on the page
+   * @param selector CSS selector to check
+   * @returns true if at least one element matches the selector
+   */
+  async selectorExists(selector: string): Promise<boolean> {
+    if (!this._puppeteerPage) {
+      logger.warning('Puppeteer not attached, cannot evaluate selector');
+      return false;
+    }
+
+    try {
+      const result = await this._puppeteerPage.evaluate((sel) => {
+        const element = document.querySelector(sel);
+        return element !== null;
+      }, selector);
+      return result;
+    } catch (error) {
+      logger.warning(`Failed to evaluate selector "${selector}":`, error);
+      return false;
+    }
+  }
+
+  /**
+   * Count elements matching a CSS selector
+   * @param selector CSS selector to count
+   * @returns number of elements matching the selector
+   */
+  async countSelector(selector: string): Promise<number> {
+    if (!this._puppeteerPage) {
+      logger.warning('Puppeteer not attached, cannot count selector');
+      return 0;
+    }
+
+    try {
+      const result = await this._puppeteerPage.evaluate((sel) => {
+        const elements = document.querySelectorAll(sel);
+        return elements.length;
+      }, selector);
+      return result;
+    } catch (error) {
+      logger.warning(`Failed to count selector "${selector}":`, error);
+      return 0;
+    }
+  }
+
+  /**
+   * Get text content from elements matching a selector
+   * @param selector CSS selector
+   * @returns array of text content from matching elements
+   */
+  async getTextFromSelector(selector: string): Promise<string[]> {
+    if (!this._puppeteerPage) {
+      logger.warning('Puppeteer not attached, cannot get text');
+      return [];
+    }
+
+    try {
+      const result = await this._puppeteerPage.evaluate((sel) => {
+        const elements = document.querySelectorAll(sel);
+        return Array.from(elements).map(el => (el as HTMLElement).innerText || el.textContent || '');
+      }, selector);
+      return result;
+    } catch (error) {
+      logger.warning(`Failed to get text from selector "${selector}":`, error);
+      return [];
+    }
+  }
+
+  /**
+   * Click an element by CSS selector
+   * @param selector CSS selector to click
+   * @returns true if click was successful
+   */
+  async clickSelector(selector: string): Promise<boolean> {
+    if (!this._puppeteerPage) {
+      logger.warning('Puppeteer not attached, cannot click selector');
+      return false;
+    }
+
+    try {
+      await this._puppeteerPage.click(selector);
+      return true;
+    } catch (error) {
+      logger.warning(`Failed to click selector "${selector}":`, error);
+      return false;
+    }
+  }
+
+  /**
+   * Get all elements matching a selector as an array with index references
+   * @param selector CSS selector
+   * @returns array of element info objects
+   */
+  async querySelectorAll(selector: string): Promise<Array<{ index: number; tagName: string; text: string; href?: string; dataId?: string }>> {
+    if (!this._puppeteerPage) {
+      logger.warning('Puppeteer not attached, cannot query selector');
+      return [];
+    }
+
+    try {
+      const result = await this._puppeteerPage.evaluate((sel) => {
+        const elements = document.querySelectorAll(sel);
+        return Array.from(elements).map((el, index) => {
+          const htmlEl = el as HTMLElement;
+          
+          // Get text content - try innerText first, then textContent
+          // Also try to get structured data from nested elements
+          let text = '';
+          try {
+            text = (htmlEl.innerText || htmlEl.textContent || '').trim();
+            
+            // For job cards, try to structure the content better
+            // Look for common patterns: title, company, location elements
+            const titleEl = htmlEl.querySelector('strong, [class*="title"], h3, h4');
+            const companyEl = htmlEl.querySelector('[class*="company"], [class*="subtitle"]');
+            const locationEl = htmlEl.querySelector('[class*="location"], [class*="metadata"]');
+            
+            // If we found structured elements, format them
+            if (titleEl || companyEl) {
+              const parts: string[] = [];
+              if (titleEl) parts.push(`Title: ${(titleEl as HTMLElement).innerText?.trim() || ''}`);
+              if (companyEl) parts.push(`Company: ${(companyEl as HTMLElement).innerText?.trim() || ''}`);
+              if (locationEl) parts.push(`Location: ${(locationEl as HTMLElement).innerText?.trim() || ''}`);
+              if (parts.length > 0) {
+                text = parts.join('\n') + '\n---\n' + text;
+              }
+            }
+          } catch {
+            text = '';
+          }
+          
+          // Try to find href in the element or its children
+          let href = '';
+          const linkEl = el.tagName === 'A' ? el : el.querySelector('a');
+          if (linkEl) {
+            href = (linkEl as HTMLAnchorElement).href || '';
+          }
+          
+          // Get data-id from the element or parent
+          let dataId = htmlEl.dataset?.jobId || 
+                        htmlEl.dataset?.occludableJobId || 
+                        htmlEl.getAttribute('data-job-id') ||
+                        htmlEl.getAttribute('data-occludable-job-id') ||
+                        '';
+          
+          // Also check parent for job ID
+          if (!dataId && htmlEl.parentElement) {
+            dataId = htmlEl.parentElement.dataset?.jobId ||
+                    htmlEl.parentElement.dataset?.occludableJobId ||
+                    htmlEl.parentElement.getAttribute('data-job-id') ||
+                    htmlEl.parentElement.getAttribute('data-occludable-job-id') ||
+                    '';
+          }
+          
+          return {
+            index,
+            tagName: el.tagName.toLowerCase(),
+            text: text.slice(0, 1500),  // Increased for structured content
+            href: href || undefined,
+            dataId: dataId || undefined,
+          };
+        });
+      }, selector);
+      
+      logger.info(`querySelectorAll("${selector}"): found ${result.length} elements`);
+      if (result.length > 0) {
+        logger.debug(`First element text preview: "${result[0].text.slice(0, 100)}..."`);
+      }
+      
+      return result;
+    } catch (error) {
+      logger.warning(`Failed to query selector "${selector}":`, error);
+      return [];
+    }
+  }
+
+  /**
+   * Evaluate a function on an element by its index
+   * @param index Element index from selector map
+   * @param fn Function to evaluate on the element
+   * @returns Result of the function evaluation
+   */
+  async evaluateOnElement<T>(
+    index: number, 
+    fn: (el: Element) => T
+  ): Promise<T | null> {
+    const selectorMap = this.getSelectorMap();
+    const element = selectorMap.get(index);
+    
+    if (!element || !this._puppeteerPage) {
+      return null;
+    }
+
+    try {
+      const elementHandle = await this.locateElement(element);
+      if (!elementHandle) {
+        return null;
+      }
+      
+      const result = await elementHandle.evaluate(fn);
+      return result;
+    } catch (error) {
+      logger.warning(`Failed to evaluate on element ${index}:`, error);
+      return null;
     }
   }
 }

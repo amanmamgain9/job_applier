@@ -289,6 +289,7 @@ export class MessageManager {
   /**
    * Prune old history messages using sliding window.
    * Keeps 'init' messages and the most recent N non-init messages.
+   * IMPORTANT: Ensures AIMessage with tool_calls and their ToolMessage responses are kept together.
    */
   public pruneHistory(): void {
     // Separate init messages from history messages
@@ -308,17 +309,50 @@ export class MessageManager {
       return;
     }
     
-    // Calculate how many to remove
-    const toRemove = historyMessages.length - this.settings.maxHistoryMessages;
-    logger.debug(`Pruning ${toRemove} old history messages (keeping ${this.settings.maxHistoryMessages})`);
+    // Group messages into pairs: AIMessage with tool_calls + ToolMessage response
+    // These must be kept together to avoid tool_use_id mismatch errors
+    const messagePairs: Array<typeof this.history.messages> = [];
+    let i = 0;
+    while (i < historyMessages.length) {
+      const msg = historyMessages[i];
+      const pair: typeof this.history.messages = [msg];
+      
+      // Check if this is an AIMessage with tool_calls
+      if (msg.message instanceof AIMessage && msg.message.tool_calls && msg.message.tool_calls.length > 0) {
+        // Look for the following ToolMessage(s)
+        let j = i + 1;
+        while (j < historyMessages.length && historyMessages[j].message instanceof ToolMessage) {
+          pair.push(historyMessages[j]);
+          j++;
+        }
+        i = j;
+      } else {
+        i++;
+      }
+      
+      messagePairs.push(pair);
+    }
     
-    // Remove oldest history messages (keep the newest ones)
-    const prunedHistory = historyMessages.slice(toRemove);
+    // Calculate how many pairs to remove
+    const targetPairs = Math.ceil(this.settings.maxHistoryMessages / 2); // Approximate pairs
+    const pairsToRemove = Math.max(0, messagePairs.length - targetPairs);
+    
+    if (pairsToRemove === 0) {
+      return;
+    }
+    
+    logger.debug(`Pruning ${pairsToRemove} message pairs (keeping ${messagePairs.length - pairsToRemove} pairs)`);
+    
+    // Keep the newest pairs
+    const keptPairs = messagePairs.slice(pairsToRemove);
+    const prunedHistory = keptPairs.flat();
     
     // Calculate tokens removed
     let tokensRemoved = 0;
-    for (let i = 0; i < toRemove; i++) {
-      tokensRemoved += historyMessages[i].metadata.tokens;
+    for (let k = 0; k < pairsToRemove; k++) {
+      for (const msg of messagePairs[k]) {
+        tokensRemoved += msg.metadata.tokens;
+      }
     }
     
     // Rebuild the message list: init messages + pruned history

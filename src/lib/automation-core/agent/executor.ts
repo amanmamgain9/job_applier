@@ -248,13 +248,77 @@ export class Executor {
    * Build the final result
    */
   private buildResult(success: boolean, error?: string, finalAnswer?: string): TaskResult {
+    // If no final answer but we have cached content from steps, collect it
+    // This helps recover partial data when task fails prematurely
+    let answer = finalAnswer;
+    if (!answer) {
+      const cachedContent = this.collectCachedContent();
+      if (cachedContent) {
+        console.log('[Executor] No final answer, using cached content:', cachedContent.substring(0, 200));
+        answer = cachedContent;
+      }
+    }
+    
     return {
       success,
       error,
       steps: this.context.stepHistory,
       finalUrl: '', // Will be populated from browser state
-      finalAnswer,
+      finalAnswer: answer,
     };
+  }
+
+  /**
+   * Collect cached content from step history
+   * This extracts content from cache_content actions for recovery when task fails
+   */
+  private collectCachedContent(): string | null {
+    const cachedItems: string[] = [];
+    
+    for (const step of this.context.stepHistory) {
+      for (const action of step.actions) {
+        // Look for cache_content actions
+        if (action.name === 'cache_content' && action.result?.extractedContent) {
+          // Extract the content - it's wrapped in <content> tags
+          const content = action.result.extractedContent;
+          const match = content.match(/<content>([\s\S]*?)<\/content>/);
+          if (match) {
+            cachedItems.push(match[1].trim());
+          } else {
+            cachedItems.push(content);
+          }
+        }
+      }
+    }
+    
+    if (cachedItems.length === 0) {
+      return null;
+    }
+    
+    // Try to extract job objects from cached content and format as JSON array
+    const jobObjects: unknown[] = [];
+    for (const item of cachedItems) {
+      // Look for JSON objects in the cached content
+      const jsonMatch = item.match(/\{[\s\S]*?"title"[\s\S]*?\}/g);
+      if (jsonMatch) {
+        for (const jsonStr of jsonMatch) {
+          try {
+            const obj = JSON.parse(jsonStr);
+            jobObjects.push(obj);
+          } catch {
+            // Not valid JSON, skip
+          }
+        }
+      }
+    }
+    
+    if (jobObjects.length > 0) {
+      console.log(`[Executor] Recovered ${jobObjects.length} job objects from cached content`);
+      return JSON.stringify(jobObjects);
+    }
+    
+    // Return raw cached items if no JSON found
+    return cachedItems.join('\n');
   }
 
   /**

@@ -218,8 +218,9 @@ export class ActionBuilder {
         this.context.emitActionEvent('click_element', 'start', intent);
 
         const page = await this.context.browserContext.getCurrentPage();
-        console.log('[Action] click_element - getting state...');
-        const state = await page.getState();
+        console.log('[Action] click_element - getting cached state...');
+        // Use cached state to match what the LLM saw - don't refresh the DOM
+        const state = page.getCachedState();
 
         const elementNode = state?.selectorMap.get(args.index);
         if (!elementNode) {
@@ -277,7 +278,8 @@ export class ActionBuilder {
         this.context.emitActionEvent('input_text', 'start', intent);
 
         const page = await this.context.browserContext.getCurrentPage();
-        const state = await page.getState();
+        // Use cached state to match what the LLM saw - don't refresh the DOM
+        const state = page.getCachedState();
 
         const elementNode = state?.selectorMap.get(args.index);
         if (!elementNode) {

@@ -154,39 +154,50 @@ export class BrowserContext {
       timeoutMs?: number;
     } = {},
   ): Promise<void> {
-    const { waitForUpdate = true, waitForActivation = true, timeoutMs = 5000 } = options;
+    // waitForActivation defaults to false - DevTools Protocol doesn't require tab to be visually active
+    const { waitForUpdate = true, waitForActivation = false, timeoutMs = 5000 } = options;
+
+    logger.info(`[waitForTabEvents] tabId=${tabId}, waitForUpdate=${waitForUpdate}, waitForActivation=${waitForActivation}, timeout=${timeoutMs}ms`);
 
     const promises: Promise<void>[] = [];
 
     if (waitForUpdate) {
-      const updatePromise = new Promise<void>(resolve => {
+      const updatePromise = new Promise<void>((resolve, reject) => {
         let hasUrl = false;
         let hasTitle = false;
         let isComplete = false;
 
+        const checkAndResolve = (source: string) => {
+          logger.info(`[waitForTabEvents] ${source}: hasUrl=${hasUrl}, hasTitle=${hasTitle}, isComplete=${isComplete}`);
+          if (hasUrl && hasTitle && isComplete) {
+            chrome.tabs.onUpdated.removeListener(onUpdatedHandler);
+            logger.info(`[waitForTabEvents] Update complete for tab ${tabId}`);
+            resolve();
+          }
+        };
+
         const onUpdatedHandler = (updatedTabId: number, changeInfo: chrome.tabs.TabChangeInfo) => {
           if (updatedTabId !== tabId) return;
 
-          if (changeInfo.url) hasUrl = true;
-          if (changeInfo.title) hasTitle = true;
+          logger.info(`[waitForTabEvents] onUpdated event:`, changeInfo);
+          if (changeInfo.url !== undefined) hasUrl = true;
+          if (changeInfo.title !== undefined) hasTitle = true;
           if (changeInfo.status === 'complete') isComplete = true;
 
-          if (hasUrl && hasTitle && isComplete) {
-            chrome.tabs.onUpdated.removeListener(onUpdatedHandler);
-            resolve();
-          }
+          checkAndResolve('onUpdated');
         };
         chrome.tabs.onUpdated.addListener(onUpdatedHandler);
 
         chrome.tabs.get(tabId).then(tab => {
-          if (tab.url) hasUrl = true;
-          if (tab.title) hasTitle = true;
+          logger.info(`[waitForTabEvents] Initial tab state: url=${tab.url}, title=${tab.title}, status=${tab.status}`);
+          if (tab.url !== undefined) hasUrl = true;
+          if (tab.title !== undefined) hasTitle = true;
           if (tab.status === 'complete') isComplete = true;
 
-          if (hasUrl && hasTitle && isComplete) {
-            chrome.tabs.onUpdated.removeListener(onUpdatedHandler);
-            resolve();
-          }
+          checkAndResolve('initial');
+        }).catch(err => {
+          logger.error(`[waitForTabEvents] Failed to get tab ${tabId}:`, err);
+          reject(err);
         });
       });
       promises.push(updatePromise);
@@ -197,6 +208,7 @@ export class BrowserContext {
         const onActivatedHandler = (activeInfo: chrome.tabs.TabActiveInfo) => {
           if (activeInfo.tabId === tabId) {
             chrome.tabs.onActivated.removeListener(onActivatedHandler);
+            logger.info(`[waitForTabEvents] Tab ${tabId} activated`);
             resolve();
           }
         };
@@ -205,6 +217,7 @@ export class BrowserContext {
         chrome.tabs.get(tabId).then(tab => {
           if (tab.active) {
             chrome.tabs.onActivated.removeListener(onActivatedHandler);
+            logger.info(`[waitForTabEvents] Tab ${tabId} already active`);
             resolve();
           }
         });
@@ -212,11 +225,20 @@ export class BrowserContext {
       promises.push(activatedPromise);
     }
 
+    if (promises.length === 0) {
+      logger.info(`[waitForTabEvents] No promises to wait for, returning immediately`);
+      return;
+    }
+
     const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`Tab operation timed out after ${timeoutMs} ms`)), timeoutMs),
+      setTimeout(() => {
+        logger.error(`[waitForTabEvents] TIMEOUT after ${timeoutMs}ms for tab ${tabId}`);
+        reject(new Error(`Tab operation timed out after ${timeoutMs} ms`));
+      }, timeoutMs),
     );
 
     await Promise.race([Promise.all(promises), timeoutPromise]);
+    logger.info(`[waitForTabEvents] Completed for tab ${tabId}`);
   }
 
   public async switchTab(tabId: number): Promise<Page> {
@@ -232,21 +254,28 @@ export class BrowserContext {
   }
 
   public async navigateTo(url: string): Promise<void> {
+    logger.info(`[navigateTo] Starting navigation to: ${url}`);
+    
     if (!isUrlAllowed(url, this._config.allowedUrls, this._config.deniedUrls)) {
       throw new URLNotAllowedError(`URL: ${url} is not allowed`);
     }
 
     const page = await this.getCurrentPage();
     if (!page) {
+      logger.info(`[navigateTo] No current page, opening new tab`);
       await this.openTab(url);
       return;
     }
 
+    logger.info(`[navigateTo] Current page tabId=${page.tabId}, attached=${page.attached}`);
+
     if (page.attached) {
+      logger.info(`[navigateTo] Using Puppeteer navigation (page is attached)`);
       await page.navigateTo(url);
       return;
     }
 
+    logger.info(`[navigateTo] Using chrome.tabs.update (page not attached)`);
     const tabId = page.tabId;
     await chrome.tabs.update(tabId, { url, active: true });
     await this.waitForTabEvents(tabId);
@@ -254,9 +283,12 @@ export class BrowserContext {
     const updatedPage = await this._getOrCreatePage(await chrome.tabs.get(tabId), true);
     await this.attachPage(updatedPage);
     this._currentTabId = tabId;
+    logger.info(`[navigateTo] Navigation complete`);
   }
 
   public async openTab(url: string): Promise<Page> {
+    logger.info(`[openTab] Opening new tab with url: ${url}`);
+    
     if (!isUrlAllowed(url, this._config.allowedUrls, this._config.deniedUrls)) {
       throw new URLNotAllowedError(`Open tab failed. URL: ${url} is not allowed`);
     }
@@ -265,13 +297,16 @@ export class BrowserContext {
     if (!tab.id) {
       throw new Error('No tab ID available');
     }
+    logger.info(`[openTab] Tab created with id=${tab.id}, waiting for load...`);
     await this.waitForTabEvents(tab.id);
 
     const updatedTab = await chrome.tabs.get(tab.id);
+    logger.info(`[openTab] Tab loaded: url=${updatedTab.url}, status=${updatedTab.status}`);
     const page = await this._getOrCreatePage(updatedTab);
     await this.attachPage(page);
     this._currentTabId = tab.id;
 
+    logger.info(`[openTab] Complete, tabId=${tab.id}`);
     return page;
   }
 

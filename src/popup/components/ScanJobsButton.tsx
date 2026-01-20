@@ -1,7 +1,21 @@
 import { useState } from 'react';
-import { Search, Square, AlertCircle, LogIn, ShieldAlert } from 'lucide-react';
+import { Search, Square, AlertCircle, LogIn, ShieldAlert, Check } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useDiscovery } from '../hooks/useDiscovery';
+
+// Predefined job search URLs to scan
+const JOB_SEARCH_URLS = [
+  {
+    id: 'linkedin',
+    name: 'LinkedIn',
+    url: 'https://www.linkedin.com/jobs/search/?keywords=software%20engineer&location=Remote',
+  },
+  {
+    id: 'wellfound',
+    name: 'Wellfound',
+    url: 'https://wellfound.com/jobs',
+  },
+];
 
 interface StatusUI {
   icon: React.ReactNode;
@@ -22,31 +36,36 @@ export function ScanJobsButton() {
     stopDiscovery,
   } = useDiscovery();
   
-  const [inputUrl, setInputUrl] = useState('');
+  // All URLs selected by default
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(
+    new Set(JOB_SEARCH_URLS.map(item => item.id))
+  );
+
+  const toggleSelection = (id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
 
   const handleClick = async () => {
     if (isRunning) {
       stopDiscovery();
     } else {
-      // Use input URL or get current tab URL
-      let url = inputUrl.trim();
-      
-      if (!url) {
-        // Try to get current tab URL
-        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (tab?.url && (tab.url.includes('/jobs') || tab.url.includes('indeed.com'))) {
-          url = tab.url;
-        }
+      // Get first selected URL for now (TODO: support multiple in sequence)
+      const selectedUrl = JOB_SEARCH_URLS.find(item => selectedIds.has(item.id));
+      if (selectedUrl) {
+        startDiscovery({ url: selectedUrl.url });
       }
-      
-      if (!url) {
-        alert('Please enter a job search URL or navigate to a job search page');
-        return;
-      }
-      
-      startDiscovery({ url });
     }
   };
+  
+  const selectedCount = selectedIds.size;
 
   const getStatusUI = (): StatusUI => {
     switch (status) {
@@ -86,7 +105,7 @@ export function ScanJobsButton() {
         return {
           icon: <Search className="w-4 h-4" />,
           text: 'Scan Jobs',
-          subtext: 'Enter URL or use current tab',
+          subtext: `${selectedCount} source${selectedCount !== 1 ? 's' : ''} selected`,
           className: cn(
             'bg-gradient-to-r from-[var(--color-accent)] to-indigo-500',
             'hover:from-indigo-500 hover:to-[var(--color-accent)]',
@@ -97,24 +116,45 @@ export function ScanJobsButton() {
   };
 
   const { icon, text, subtext, className } = getStatusUI();
-  const isDisabled = status === 'captcha' || status === 'login_required';
+  const isDisabled = status === 'captcha' || status === 'login_required' || selectedCount === 0;
 
   return (
-    <div className="space-y-2">
-      {/* URL Input */}
+    <div className="space-y-3">
+      {/* Source Checklist */}
       {!isRunning && status === 'idle' && (
-        <input
-          type="url"
-          value={inputUrl}
-          onChange={(e) => setInputUrl(e.target.value)}
-          placeholder="https://linkedin.com/jobs/search?..."
-          className={cn(
-            'w-full px-3 py-2 rounded-lg text-sm',
-            'bg-[var(--color-bg-card)] border border-[var(--color-border)]',
-            'text-[var(--color-text)] placeholder:text-[var(--color-text-muted)]',
-            'focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)]/50'
-          )}
-        />
+        <div className="space-y-1">
+          {JOB_SEARCH_URLS.map((item) => {
+            const isSelected = selectedIds.has(item.id);
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => toggleSelection(item.id)}
+                className={cn(
+                  'w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm',
+                  'transition-colors duration-150',
+                  'bg-[var(--color-bg-card)] border',
+                  isSelected
+                    ? 'border-[var(--color-accent)]/50 text-[var(--color-text)]'
+                    : 'border-[var(--color-border)] text-[var(--color-text-muted)]'
+                )}
+              >
+                <div
+                  className={cn(
+                    'w-4 h-4 rounded flex items-center justify-center',
+                    'border transition-colors duration-150',
+                    isSelected
+                      ? 'bg-[var(--color-accent)] border-[var(--color-accent)]'
+                      : 'border-[var(--color-border)]'
+                  )}
+                >
+                  {isSelected && <Check className="w-3 h-3 text-white" />}
+                </div>
+                <span>{item.name}</span>
+              </button>
+            );
+          })}
+        </div>
       )}
       
       <button
