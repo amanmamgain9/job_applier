@@ -16,7 +16,9 @@ export type MessageType =
   | 'STOP_DISCOVERY'
   | 'DISCOVERY_STATE'
   | 'DISCOVERY_JOB_FOUND'
-  | 'GET_SESSION_REPORT';
+  | 'GET_SESSION_REPORT'
+  // Dev tools
+  | 'TEST_STRATEGY_PLANNER';
 
 export interface BaseMessage<T extends MessageType, P = unknown> {
   type: T;
@@ -62,6 +64,12 @@ export type DiscoveryStateMessage = BaseMessage<'DISCOVERY_STATE', DiscoveryStat
 export type DiscoveryJobFoundMessage = BaseMessage<'DISCOVERY_JOB_FOUND', Job>;
 export type GetSessionReportMessage = BaseMessage<'GET_SESSION_REPORT', undefined>;
 
+// Dev tools
+export interface TestStrategyPlannerPayload {
+  task?: string;
+}
+export type TestStrategyPlannerMessage = BaseMessage<'TEST_STRATEGY_PLANNER', TestStrategyPlannerPayload>;
+
 export type ExtensionMessage =
   | CaptureJobMessage
   | JobCapturedMessage
@@ -75,7 +83,8 @@ export type ExtensionMessage =
   | StopDiscoveryMessage
   | DiscoveryStateMessage
   | DiscoveryJobFoundMessage
-  | GetSessionReportMessage;
+  | GetSessionReportMessage
+  | TestStrategyPlannerMessage;
 
 export function createMessage<T extends MessageType, P>(
   type: T,

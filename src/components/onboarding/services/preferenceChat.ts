@@ -1,24 +1,17 @@
 import type { ChatMessage, ExtractedPreferences, ParsedCV } from '../types';
 
-// --- LLM Config (Anthropic Claude) ---
+// --- LLM Config (Google Gemini) ---
 
-interface LLMConfig {
-  apiKey: string;
-}
-
-const LLM_MODEL = 'claude-sonnet-4-20250514';
-const LLM_BASE_URL = 'https://api.anthropic.com/v1';
-
-// Check if running in Chrome extension context
-const isChromeExtension = typeof chrome !== 'undefined' && chrome.storage?.sync;
+const LLM_MODEL = 'gemini-2.0-flash';
+const LLM_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 
 function getApiKey(): string | null {
   // First check .env (dev mode)
-  const envKey = import.meta.env.VITE_ANTHROPIC_API_KEY;
+  const envKey = import.meta.env.VITE_GEMINI_API_KEY;
   if (envKey) return envKey;
 
   // Fallback to localStorage
-  const item = localStorage.getItem('anthropicApiKey');
+  const item = localStorage.getItem('geminiApiKey');
   return item || null;
 }
 
@@ -42,31 +35,37 @@ async function chatWithLLM(
     throw new LLMError('No API key configured', 'NO_API_KEY');
   }
 
-  // Extract system message for Anthropic format
+  // Extract system message for Gemini format
   const systemMessage = messages.find((m) => m.role === 'system')?.content;
-  const chatMessages = messages
+  
+  // Convert messages to Gemini format
+  const geminiContents = messages
     .filter((m) => m.role !== 'system')
-    .map((m) => ({ role: m.role, content: m.content }));
+    .map((m) => ({
+      role: m.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: m.content }],
+    }));
 
-  const response = await fetch(`${LLM_BASE_URL}/messages`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true',
-    },
-    body: JSON.stringify({
-      model: LLM_MODEL,
-      max_tokens: 1024,
-      system: systemMessage,
-      messages: chatMessages,
-      temperature: options.temperature ?? 0.7,
-    }),
-  });
+  const response = await fetch(
+    `${LLM_BASE_URL}/models/${LLM_MODEL}:generateContent?key=${apiKey}`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        systemInstruction: systemMessage ? { parts: [{ text: systemMessage }] } : undefined,
+        contents: geminiContents,
+        generationConfig: {
+          temperature: options.temperature ?? 0.7,
+          maxOutputTokens: 1024,
+        },
+      }),
+    }
+  );
 
   if (!response.ok) {
-    if (response.status === 401) {
+    if (response.status === 401 || response.status === 403) {
       throw new LLMError('Invalid API key', 'INVALID_KEY');
     }
     if (response.status === 429) {
@@ -76,7 +75,7 @@ async function chatWithLLM(
   }
 
   const data = await response.json();
-  return data.content?.[0]?.text ?? '';
+  return data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
 }
 
 // --- CV Parsing ---
@@ -114,49 +113,55 @@ export async function parseCV(file: FileInput): Promise<ParsedCV> {
   }
 
   try {
-    // Build message content based on file type (Anthropic format)
-    const messageContent =
+    // Build message content based on file type (Gemini format)
+    const parts =
       file.type === 'pdf'
         ? [
             {
-              type: 'document',
-              source: {
-                type: 'base64',
-                media_type: 'application/pdf',
+              inlineData: {
+                mimeType: 'application/pdf',
                 data: file.content,
               },
             },
-            { type: 'text', text: CV_PARSE_PROMPT },
+            { text: CV_PARSE_PROMPT },
           ]
-        : [{ type: 'text', text: `${CV_PARSE_PROMPT}\n\nCV Text:\n${file.content.slice(0, 8000)}` }];
+        : [{ text: `${CV_PARSE_PROMPT}\n\nCV Text:\n${file.content.slice(0, 8000)}` }];
 
-    const response = await fetch(`${LLM_BASE_URL}/messages`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true',
-      },
-      body: JSON.stringify({
-        model: LLM_MODEL,
-        max_tokens: 1024,
-        messages: [{ role: 'user', content: messageContent }],
-        temperature: 0.1,
-      }),
-    });
+    const response = await fetch(
+      `${LLM_BASE_URL}/models/${LLM_MODEL}:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts }],
+          generationConfig: {
+            temperature: 0.1,
+            maxOutputTokens: 1024,
+          },
+        }),
+      }
+    );
 
     if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      console.error('CV parse API error:', response.status, errorData);
       throw new LLMError('API request failed', 'API_ERROR');
     }
 
     const data = await response.json();
-    const text = data.content?.[0]?.text ?? '';
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
 
+    // Try to extract JSON from response
     const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
     const jsonStr = jsonMatch ? jsonMatch[1] : text;
-    return JSON.parse(jsonStr.trim());
+    
+    // Clean up and parse
+    const cleanJson = jsonStr.trim().replace(/^[^{]*/, '').replace(/[^}]*$/, '');
+    return JSON.parse(cleanJson);
   } catch (err) {
+    console.error('CV parse error:', err);
     if (err instanceof LLMError) throw err;
     // Return minimal parsed data if LLM fails
     return {

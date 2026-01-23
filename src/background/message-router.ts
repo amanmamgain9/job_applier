@@ -22,6 +22,7 @@ import {
   onJobFound,
   hasLLMConfig,
 } from './discovery';
+import { testStrategyPlannerOnActiveTab } from './planner-test';
 
 // ============================================================================
 // Initialization
@@ -133,7 +134,8 @@ async function handleMessage(
         return { success: false, error: 'URL is required for discovery' };
       }
       
-      startDiscovery({ maxJobs, url })
+      // Use the new agent flow architecture
+      startDiscovery({ maxJobs, url, useAgentFlow: true })
         .then((result) => {
           logger.info('Discovery completed', { 
             success: result.success, 
@@ -165,6 +167,23 @@ async function handleMessage(
         allReports,
         count: allReports.length,
       };
+    }
+    
+    // ---- Dev Tools ----
+    case 'TEST_STRATEGY_PLANNER': {
+      const { task } = message.payload;
+      logger.info('Testing StrategyPlanner on active tab', { task });
+      
+      try {
+        const result = await testStrategyPlannerOnActiveTab(task);
+        return result;
+      } catch (err) {
+        logger.error('StrategyPlanner test failed', { error: err });
+        return {
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
     }
     
     default:

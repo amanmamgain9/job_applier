@@ -40,7 +40,6 @@ export function createLinkedInBindings(): PageBindings {
       attribute: 'data-occludable-job-id',
     },
 
-    SCROLL_BEHAVIOR: 'infinite',
     CLICK_BEHAVIOR: 'inline',
   };
 }
@@ -70,7 +69,6 @@ export function createMinimalBindings(overrides?: Partial<PageBindings>): PageBi
       pattern: '/(\\d+)',
     },
 
-    SCROLL_BEHAVIOR: 'infinite',
     CLICK_BEHAVIOR: 'inline',
 
     ...overrides,

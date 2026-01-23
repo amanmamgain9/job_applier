@@ -18,7 +18,10 @@ import {
   createChatModel,
   createDualModelConfig,
   clearBindingsForUrl,
+  AgentOrchestrator,
+  RecipeExecutor,
   type ExtractedJobData,
+  type PhaseOutput,
 } from '@/lib/automation-core';
 
 // ============================================================================
@@ -70,6 +73,8 @@ export interface StepLog {
   error?: string;
 }
 
+// PhaseOutput is imported from automation-core
+
 export interface SessionReport {
   id: string;
   startedAt: number;
@@ -100,6 +105,19 @@ export interface SessionReport {
   logs: string[];
   /** Discovered bindings (if any) */
   discoveredBindings?: Record<string, unknown>;
+  
+  // ==========================================
+  // Phase Outputs (New Agent Flow Architecture)
+  // ==========================================
+  
+  /** Output from each phase of the agent flow */
+  phaseOutputs?: PhaseOutput[];
+  /** Raw strategy from StrategyPlanner (English understanding + strategy) */
+  strategyPlannerOutput?: string;
+  /** Generator fragments (JSON) */
+  generatorOutputs?: Record<string, unknown>;
+  /** Final generated recipe (JSON) */
+  generatedRecipe?: Record<string, unknown>;
 }
 
 // ============================================================================
@@ -123,9 +141,125 @@ let recipeRunner: RecipeRunner | null = null;
 // Session reporting state
 let sessionReports: SessionReport[] = [];
 let reportsLoaded = false;
+let liveReport: SessionReport | null = null;
 
 const REPORTS_STORAGE_KEY = 'discovery_session_reports';
 const MAX_STORED_REPORTS = 50;
+
+// ============================================================================
+// Live Report Manager - Streams report updates during discovery
+// ============================================================================
+
+function createLiveReport(url: string, task: string): SessionReport {
+  const now = Date.now();
+  const report: SessionReport = {
+    id: crypto.randomUUID(),
+    startedAt: now,
+    endedAt: now,
+    duration: 0,
+    task,
+    sourceUrl: url,
+    searchQuery: extractSearchQuery(url),
+    success: false,
+    stoppedReason: undefined,
+    jobsFound: 0,
+    jobsExtracted: [],
+    bindingFixes: 0,
+    commandsExecuted: 0,
+    totalSteps: 0,
+    successfulSteps: 0,
+    failedSteps: 0,
+    totalActions: 0,
+    successfulActions: 0,
+    failedActions: 0,
+    steps: [],
+    urlsVisited: [url],
+    finalUrl: url,
+    logs: [],
+    phaseOutputs: [],
+  };
+  
+  liveReport = report;
+  sessionReports.push(report);
+  return report;
+}
+
+function updateLiveReport(updates: Partial<SessionReport>): void {
+  if (!liveReport) return;
+  
+  Object.assign(liveReport, updates);
+  liveReport.endedAt = Date.now();
+  liveReport.duration = liveReport.endedAt - liveReport.startedAt;
+  
+  // Save immediately (debounced would be better but this ensures we don't lose data)
+  saveReportsToStorage().catch(err => {
+    console.error('[Discovery] Failed to save live report:', err);
+  });
+}
+
+function addLogToLiveReport(msg: string): void {
+  if (!liveReport) return;
+  
+  const timestamp = new Date().toISOString().split('T')[1].slice(0, 12);
+  const logLine = `[${timestamp}] ${msg}`;
+  liveReport.logs.push(logLine);
+  console.log('[AgentFlow]', msg);
+}
+
+function addPhaseToLiveReport(phase: PhaseOutput): void {
+  if (!liveReport) return;
+  
+  if (!liveReport.phaseOutputs) {
+    liveReport.phaseOutputs = [];
+  }
+  liveReport.phaseOutputs.push(phase);
+  
+  // Update step tracking
+  const stepLog: StepLog = {
+    step: liveReport.steps.length + 1,
+    timestamp: phase.timestamp,
+    goal: `Phase: ${phase.phase}`,
+    actions: [{
+      timestamp: phase.timestamp,
+      action: phase.phase,
+      details: `Duration: ${phase.duration}ms`,
+      status: phase.success ? 'ok' : 'fail',
+      error: phase.error,
+    }],
+    success: phase.success,
+    error: phase.error,
+  };
+  
+  liveReport.steps.push(stepLog);
+  liveReport.totalSteps = liveReport.steps.length;
+  liveReport.successfulSteps = liveReport.steps.filter(s => s.success).length;
+  liveReport.failedSteps = liveReport.steps.filter(s => !s.success).length;
+  liveReport.totalActions = liveReport.steps.reduce((sum, s) => sum + s.actions.length, 0);
+  liveReport.successfulActions = liveReport.steps.reduce((sum, s) => sum + s.actions.filter(a => a.status === 'ok').length, 0);
+  liveReport.failedActions = liveReport.steps.reduce((sum, s) => sum + s.actions.filter(a => a.status === 'fail').length, 0);
+  
+  // Save after each phase
+  saveReportsToStorage().catch(err => {
+    console.error('[Discovery] Failed to save phase update:', err);
+  });
+}
+
+function finalizeLiveReport(success: boolean, error?: string, stoppedReason?: SessionReport['stoppedReason']): void {
+  if (!liveReport) return;
+  
+  liveReport.success = success;
+  liveReport.error = error;
+  liveReport.stoppedReason = stoppedReason;
+  liveReport.endedAt = Date.now();
+  liveReport.duration = liveReport.endedAt - liveReport.startedAt;
+  
+  // Final save
+  saveReportsToStorage().catch(err => {
+    console.error('[Discovery] Failed to save final report:', err);
+  });
+  
+  liveReport = null;
+}
 
 // ============================================================================
 // Storage
@@ -501,7 +635,6 @@ export async function discoverJobsWithRecipe(options: DiscoveryOptions): Promise
         LIST_ITEM: result.bindings.LIST_ITEM,
         DETAILS_PANEL: result.bindings.DETAILS_PANEL,
         DETAILS_CONTENT: result.bindings.DETAILS_CONTENT,
-        SCROLL_BEHAVIOR: result.bindings.SCROLL_BEHAVIOR,
         CLICK_BEHAVIOR: result.bindings.CLICK_BEHAVIOR,
       };
       log(`Bindings discovered: LIST="${result.bindings.LIST}", LIST_ITEM="${result.bindings.LIST_ITEM}"`);
@@ -608,6 +741,8 @@ export async function discoverJobsWithRecipe(options: DiscoveryOptions): Promise
       // New detailed logs
       logs,
       discoveredBindings,
+      // Phase outputs from the agent flow
+      phaseOutputs: result.phaseOutputs,
     };
 
     sessionReports.push(report);
@@ -693,13 +828,228 @@ export async function discoverJobsWithRecipe(options: DiscoveryOptions): Promise
 }
 
 // ============================================================================
+// Agent Flow Discovery (New Architecture)
+// ============================================================================
+
+/**
+ * Discover jobs using the full agent flow:
+ * StrategyPlanner → Generators → RecipeGenerator → Executor
+ * 
+ * Reports are streamed - saved after each phase completes.
+ */
+export async function discoverJobsWithAgentFlow(options: DiscoveryOptions): Promise<DiscoveryResult> {
+  const { maxJobs, url, forceRefresh } = options;
+
+  if (discoveryState.status === 'running') {
+    return { success: false, jobs: [], error: 'Discovery already running' };
+  }
+
+  if (!url) {
+    return { success: false, jobs: [], error: 'URL is required' };
+  }
+
+  // Create live report immediately - this will be streamed/saved after each phase
+  const report = createLiveReport(url, `Extract ${maxJobs} jobs`);
+  const jobs: Job[] = [];
+
+  try {
+    updateState({
+      status: 'running',
+      jobsFound: 0,
+      currentStep: 0,
+      startedAt: report.startedAt,
+      error: undefined,
+    });
+
+    addLogToLiveReport(`Starting agent flow discovery for: ${url}`);
+    addLogToLiveReport(`Max jobs to extract: ${maxJobs}`);
+
+    // Add navigation step
+    addPhaseToLiveReport({
+      phase: 'binding_discovery', // Using this for navigate step
+      timestamp: Date.now(),
+      duration: 0,
+      success: true,
+      output: `Navigating to ${url}`,
+    });
+
+    if (forceRefresh) {
+      addLogToLiveReport('Force refresh - clearing cached bindings');
+      await clearBindingsForUrl(url);
+    }
+
+    // Initialize LLM
+    addLogToLiveReport('Initializing LLM models...');
+    const geminiApiKey = getGeminiApiKey();
+    addLogToLiveReport(`Gemini API key present: ${geminiApiKey ? 'YES' : 'NO'}`);
+    
+    const modelConfig = createDualModelConfig(geminiApiKey);
+    const plannerLLM = createChatModel(modelConfig.navigator);
+    const extractorLLM = createChatModel(modelConfig.extractor);
+    addLogToLiveReport('LLM models created');
+
+    // Initialize browser
+    addLogToLiveReport('Initializing browser context...');
+    browserContext = await initBrowserContext(url);
+    const page = await browserContext.getCurrentPage();
+    
+    addLogToLiveReport(`Page URL: ${page.url()}`);
+    addLogToLiveReport(`Page title: ${await page.title()}`);
+    
+    updateLiveReport({ finalUrl: page.url() });
+
+    // Create orchestrator
+    const orchestrator = new AgentOrchestrator({
+      plannerLLM,
+      generatorLLM: plannerLLM,
+      maxToolCalls: 5,
+    });
+
+    // Run the full agent flow
+    addLogToLiveReport('Running agent orchestration...');
+    updateState({ currentStep: 1, maxSteps: 4 });
+    
+    const orchestratorResult = await orchestrator.run({
+      page,
+      task: `Extract ${maxJobs} job listings from this page`,
+      maxItems: maxJobs,
+    });
+
+    // Add each phase output to the live report (they're already saved incrementally)
+    for (const phase of orchestratorResult.phaseOutputs) {
+      addPhaseToLiveReport(phase);
+      addLogToLiveReport(`Phase ${phase.phase}: ${phase.success ? 'SUCCESS' : 'FAILED'} (${phase.duration}ms)`);
+      if (phase.error) {
+        addLogToLiveReport(`  Error: ${phase.error}`);
+      }
+    }
+
+    updateState({ currentStep: 2, maxSteps: 4 });
+
+    if (!orchestratorResult.success || !orchestratorResult.recipe || !orchestratorResult.bindings) {
+      addLogToLiveReport(`Orchestration failed: ${orchestratorResult.error}`);
+      throw new Error(orchestratorResult.error || 'Recipe generation failed');
+    }
+
+    addLogToLiveReport(`Recipe generated: ${orchestratorResult.recipe.id} with ${orchestratorResult.recipe.commands.length} commands`);
+    addLogToLiveReport(`Bindings: LIST="${orchestratorResult.bindings.LIST}", LIST_ITEM="${orchestratorResult.bindings.LIST_ITEM}"`);
+
+    // Store bindings and recipe in report
+    addLogToLiveReport('Storing bindings and recipe...');
+    updateLiveReport({
+      discoveredBindings: {
+        id: orchestratorResult.bindings.id,
+        LIST: orchestratorResult.bindings.LIST,
+        LIST_ITEM: orchestratorResult.bindings.LIST_ITEM,
+        DETAILS_PANEL: orchestratorResult.bindings.DETAILS_PANEL,
+        DETAILS_CONTENT: orchestratorResult.bindings.DETAILS_CONTENT,
+        CLICK_BEHAVIOR: orchestratorResult.bindings.CLICK_BEHAVIOR,
+      },
+      strategyPlannerOutput: orchestratorResult.strategy,
+      generatedRecipe: orchestratorResult.recipe as unknown as Record<string, unknown>,
+    });
+
+    // Execute the generated recipe
+    addLogToLiveReport('Creating executor...');
+    const executor = new RecipeExecutor(page, orchestratorResult.bindings, extractorLLM);
+    addLogToLiveReport('Starting recipe execution...');
+    updateState({ currentStep: 3, maxSteps: 4 });
+    
+    let execResult;
+    try {
+      execResult = await executor.execute(orchestratorResult.recipe);
+      addLogToLiveReport(`Execution finished: ${execResult.success ? 'SUCCESS' : 'FAILED'}`);
+    } catch (execError) {
+      const execErrorMsg = execError instanceof Error ? execError.message : String(execError);
+      addLogToLiveReport(`EXECUTION CRASHED: ${execErrorMsg}`);
+      throw execError;
+    }
+
+    // Add execution phase
+    addPhaseToLiveReport({
+      phase: 'binding_discovery', // Using for execution step
+      timestamp: Date.now(),
+      duration: execResult.stats.duration || 0,
+      success: execResult.success,
+      output: `Executed ${execResult.stats.commandsExecuted} commands, extracted ${execResult.items.length} items`,
+      error: execResult.error,
+    });
+
+    updateState({ currentStep: 4, maxSteps: 4 });
+    addLogToLiveReport(`Execution complete: ${execResult.items.length} items extracted`);
+    addLogToLiveReport(`Stats: commands=${execResult.stats.commandsExecuted}, scrolls=${execResult.stats.scrollsPerformed}`);
+
+    if (execResult.error) {
+      addLogToLiveReport(`Execution error: ${execResult.error}`);
+    }
+
+    // Convert extracted items to jobs
+    for (const item of execResult.items) {
+      const job = convertToJob(item, url);
+      jobs.push(job);
+      notifyJobFound(job);
+    }
+
+    updateState({ 
+      status: 'idle',
+      jobsFound: jobs.length,
+    });
+
+    // Finalize report
+    updateLiveReport({
+      jobsFound: jobs.length,
+      jobsExtracted: jobs,
+      commandsExecuted: execResult.stats.commandsExecuted,
+    });
+    
+    const success = jobs.length > 0;
+    const stoppedReason = jobs.length >= maxJobs ? 'max_jobs' : (success ? 'complete' : 'error');
+    finalizeLiveReport(success, execResult.error, stoppedReason);
+
+    return {
+      success,
+      jobs,
+      stoppedReason,
+      report,
+    };
+
+  } catch (err) {
+    const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+    addLogToLiveReport(`ERROR: ${errorMessage}`);
+    
+    updateState({ status: 'error', error: errorMessage });
+    
+    // Finalize report with error
+    updateLiveReport({
+      jobsFound: jobs.length,
+      jobsExtracted: jobs,
+    });
+    finalizeLiveReport(false, errorMessage, 'error');
+
+    return {
+      success: false,
+      jobs,
+      stoppedReason: 'error',
+      error: errorMessage,
+      report,
+    };
+  } finally {
+    await cleanup();
+  }
+}
+
+// ============================================================================
 // Public API
 // ============================================================================
 
 /**
- * Start job discovery using the Recipe API
+ * Start job discovery using the Recipe API (default)
+ * Set useAgentFlow=true to use the new agent architecture
  */
-export async function startDiscovery(options: DiscoveryOptions): Promise<DiscoveryResult> {
+export async function startDiscovery(options: DiscoveryOptions & { useAgentFlow?: boolean }): Promise<DiscoveryResult> {
+  if (options.useAgentFlow) {
+    return discoverJobsWithAgentFlow(options);
+  }
   return discoverJobsWithRecipe(options);
 }
 

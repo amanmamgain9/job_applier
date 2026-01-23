@@ -41,7 +41,6 @@ function createMockNavigatorLLM(options: {
     DETAILS_LOADED: { exists: '.list-item' },
     NO_MORE_ITEMS: { exists: '.no-results' },
     ITEM_ID: { from: 'href', pattern: '/(\\d+)' },
-    SCROLL_BEHAVIOR: 'infinite',
     CLICK_BEHAVIOR: 'inline',
   };
 
@@ -337,7 +336,7 @@ describe('RecipeRunner', () => {
       
       const commandTypes = recipe.commands.map(c => c.type);
       expect(commandTypes).toContain('OPEN_PAGE');
-      expect(commandTypes).toContain('WAIT_FOR_PAGE');
+      expect(commandTypes).toContain('WAIT_FOR');
       expect(commandTypes).toContain('REPEAT');
     });
 
@@ -349,7 +348,7 @@ describe('RecipeRunner', () => {
       );
 
       const commandTypes = recipe.commands.map(c => c.type);
-      expect(commandTypes).toContain('GO_TO_SEARCH_BOX');
+      expect(commandTypes).toContain('GO_TO');
       expect(commandTypes).toContain('TYPE');
       expect(commandTypes).toContain('SUBMIT');
     });

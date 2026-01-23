@@ -129,9 +129,6 @@ export interface PageBindings {
   // Behavior
   // ==========================================
   
-  /** How scrolling works */
-  SCROLL_BEHAVIOR: 'infinite' | 'paginated' | 'load_more_button' | 'static';
-  
   /** What happens when you click an item */
   CLICK_BEHAVIOR: 'shows_panel' | 'navigates' | 'expands' | 'inline';
   
@@ -161,16 +158,9 @@ export function validateBindings(bindings: Partial<PageBindings>): BindingValida
   if (!bindings.ITEM_ID) errors.push('ITEM_ID extractor is required');
   if (!bindings.LIST_LOADED) errors.push('LIST_LOADED condition is required');
   if (!bindings.DETAILS_LOADED) errors.push('DETAILS_LOADED condition is required');
-  if (!bindings.SCROLL_BEHAVIOR) errors.push('SCROLL_BEHAVIOR is required');
   if (!bindings.CLICK_BEHAVIOR) errors.push('CLICK_BEHAVIOR is required');
   
   // Conditional requirements
-  if (bindings.SCROLL_BEHAVIOR === 'load_more_button' && !bindings.LOAD_MORE_BUTTON) {
-    errors.push('LOAD_MORE_BUTTON required when SCROLL_BEHAVIOR is load_more_button');
-  }
-  if (bindings.SCROLL_BEHAVIOR === 'paginated' && !bindings.NEXT_PAGE_BUTTON) {
-    errors.push('NEXT_PAGE_BUTTON required when SCROLL_BEHAVIOR is paginated');
-  }
   if (bindings.CLICK_BEHAVIOR === 'navigates' && !bindings.RETURN_TO_LIST) {
     warnings.push('RETURN_TO_LIST recommended when CLICK_BEHAVIOR is navigates');
   }
@@ -220,6 +210,8 @@ export const exampleBindings: Record<string, PageBindings> = {
     },
     
     SCROLL_CONTAINER: '.jobs-search-results-list',
+    // Pagination button at the bottom of results
+    NEXT_PAGE_BUTTON: '.artdeco-pagination__button--next',
     
     PAGE_LOADED: { exists: '.jobs-search-results-list' },
     LIST_LOADED: { exists: '.jobs-search-results__list-item' },
@@ -239,7 +231,6 @@ export const exampleBindings: Record<string, PageBindings> = {
       pattern: '/jobs/view/(\\d+)',
     },
     
-    SCROLL_BEHAVIOR: 'infinite',
     CLICK_BEHAVIOR: 'shows_panel',
   },
   
@@ -278,7 +269,6 @@ export const exampleBindings: Record<string, PageBindings> = {
       attribute: 'data-jk',
     },
     
-    SCROLL_BEHAVIOR: 'paginated',
     NEXT_PAGE_BUTTON: '[data-testid="pagination-page-next"]',
     CLICK_BEHAVIOR: 'shows_panel',
   },

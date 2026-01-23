@@ -71,6 +71,7 @@ export {
   runRecipe,
   type RunnerConfig,
   type RunnerResult,
+  type PhaseOutput,
   type ExtractedJobData,
   type ProgressCallback,
 } from './recipe/runner';
@@ -163,6 +164,37 @@ export { Executor, type ExecutorConfig } from './agent/executor';
 export { NavigatorAgent } from './agent/navigator';
 export { ActionBuilder, Action, type ActionSchema } from './agent/actions';
 export { AgentContext } from './agent/types';
+
+// StrategyPlanner Agent (New Architecture)
+export {
+  StrategyPlanner,
+  createBrowserTools,
+  createMockTools,
+  type PlannerContext,
+  type PlannerResult,
+  type PlannerTools,
+} from './agent/strategy-planner';
+
+// Generators (New Architecture)
+export {
+  FilterGenerator,
+  SortGenerator,
+  SearchGenerator,
+  RecipeGenerator,
+  type GeneratorContext,
+  type GeneratorResult,
+  type GeneratorFragment,
+  type RecipeGeneratorContext,
+  type RecipeGeneratorResult,
+} from './generators';
+
+// Agent Orchestrator (New Architecture)
+export {
+  AgentOrchestrator,
+  type OrchestratorConfig,
+  type OrchestratorContext,
+  type OrchestratorResult,
+} from './orchestrator';
 
 // LLM
 export { createChatModel, validateLLMConfig } from './llm/factory';

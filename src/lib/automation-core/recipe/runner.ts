@@ -39,6 +39,19 @@ export interface RunnerConfig {
   saveProgressEvery?: number;
 }
 
+/** Output from a phase of the agent flow */
+export interface PhaseOutput {
+  phase: 'strategy_planner' | 'filter_generator' | 'sort_generator' | 'search_generator' | 'recipe_generator' | 'binding_discovery';
+  timestamp: number;
+  duration: number;
+  success: boolean;
+  /** The actual output (English strategy, JSON fragment, or full recipe) */
+  output?: string;
+  /** Tool calls made during this phase (for StrategyPlanner) */
+  toolCalls?: Array<{ tool: string; args: Record<string, unknown>; result: string }>;
+  error?: string;
+}
+
 export interface RunnerResult {
   success: boolean;
   items: ExtractedJobData[];
@@ -53,6 +66,8 @@ export interface RunnerResult {
   };
   /** Debug logs from runner and navigator */
   logs?: string[];
+  /** Phase outputs from the agent flow */
+  phaseOutputs?: PhaseOutput[];
 }
 
 export interface ExtractedJobData {
@@ -90,6 +105,7 @@ export class RecipeRunner {
   private bindingFixCount = 0;
   private onProgress?: ProgressCallback;
   private runLogs: string[] = [];
+  private phaseOutputs: PhaseOutput[] = [];
   
   constructor(config: RunnerConfig) {
     this.config = config;
@@ -117,6 +133,7 @@ export class RecipeRunner {
     const startTime = Date.now();
     this.bindingFixCount = 0;
     this.runLogs = []; // Reset logs for this run
+    this.phaseOutputs = []; // Reset phase outputs for this run
     
     const taskId = `recipe_${recipe.id}_${Date.now()}`;
     this.happyState = new HappyStateManager(taskId);
@@ -256,6 +273,7 @@ export class RecipeRunner {
         bindingFixes: this.bindingFixCount,
       },
       logs: this.runLogs,
+      phaseOutputs: this.phaseOutputs,
     };
   }
   
@@ -292,6 +310,8 @@ export class RecipeRunner {
     
     // Step 2: Discover bindings using Navigator LLM
     this.log('Discovering bindings using Navigator LLM...');
+    const discoveryStartTime = Date.now();
+    
     try {
       const domContext = await this.getDOMContext(page);
       this.log(`DOM context: ${domContext.elements.length} chars`);
@@ -307,8 +327,26 @@ export class RecipeRunner {
       if (result.success && result.bindings) {
         this.log(`Navigator SUCCESS: LIST="${result.bindings.LIST}", LIST_ITEM="${result.bindings.LIST_ITEM}"`);
         this.log(`Full bindings: ${JSON.stringify(result.bindings).slice(0, 500)}`);
+        
+        // Track phase output for binding discovery
+        this.phaseOutputs.push({
+          phase: 'binding_discovery',
+          timestamp: discoveryStartTime,
+          duration: Date.now() - discoveryStartTime,
+          success: true,
+          output: JSON.stringify(result.bindings, null, 2),
+        });
       } else {
         this.log(`Navigator FAILED: ${result.error}`);
+        
+        // Track failed phase output
+        this.phaseOutputs.push({
+          phase: 'binding_discovery',
+          timestamp: discoveryStartTime,
+          duration: Date.now() - discoveryStartTime,
+          success: false,
+          error: result.error,
+        });
         return null;
       }
       
@@ -330,6 +368,15 @@ export class RecipeRunner {
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       this.log(`Binding discovery error: ${errorMsg}`);
+      
+      // Track failed phase output
+      this.phaseOutputs.push({
+        phase: 'binding_discovery',
+        timestamp: discoveryStartTime,
+        duration: Date.now() - discoveryStartTime,
+        success: false,
+        error: errorMsg,
+      });
       return null;
     }
   }

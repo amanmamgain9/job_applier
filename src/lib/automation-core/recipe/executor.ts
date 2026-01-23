@@ -10,12 +10,18 @@ import type {
   Command, 
   Recipe, 
   UntilCondition,
+  Condition,
+  WaitTarget,
   ForEachItemInListCommand,
   RepeatCommand,
-  IfNewItemsCommand,
+  IfCommand,
   GoToCommand,
+  ScrollCommand,
+  ScrollIfNotEndCommand,
+  ClickIfExistsCommand,
 } from './commands';
 import type { PageBindings, StateCondition } from './bindings';
+import { DOMElementNode } from '../browser/dom/views';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { createLogger } from '../utils/logger';
 
@@ -38,8 +44,8 @@ export interface ExecutionContext {
   currentItemIndex: number;
   /** Extracted content from current details view */
   extractedContent: string | null;
-  /** Last known item count (for detecting new items) */
-  lastItemCount: number;
+  /** Checkpoint count for NEW_ITEMS condition - set by CHECKPOINT_COUNT command */
+  checkpointItemCount: number;
   /** Number of scrolls with no new items */
   noNewItemsCount: number;
   /** Should stop execution */
@@ -190,7 +196,7 @@ export class RecipeExecutor {
     
     try {
       switch (command.type) {
-        // Navigation
+        // Navigation (2)
         case 'OPEN_PAGE':
           await this.page.navigateTo(command.url);
           return { success: true };
@@ -198,46 +204,18 @@ export class RecipeExecutor {
         case 'GO_BACK':
           await this.page.goBack();
           return { success: true };
-          
-        case 'REFRESH':
-          // Refresh by navigating to current URL
-          await this.page.navigateTo(this.page.url());
-          return { success: true };
         
-        // Waiting
-        case 'WAIT_FOR_PAGE':
-          return await this.waitForCondition(this.bindings.PAGE_LOADED || { exists: 'body' });
-          
-        case 'WAIT_FOR_LIST':
-          return await this.waitForCondition(this.bindings.LIST_LOADED);
-          
-        case 'WAIT_FOR_LIST_UPDATE':
-          return await this.waitForCondition(this.bindings.LIST_UPDATED);
-          
-        case 'WAIT_FOR_DETAILS':
-          // If click behavior is "inline", details are already visible in the item
-          if (this.bindings.CLICK_BEHAVIOR === 'inline') {
-            // Just a small wait for any dynamic content
-            await this.wait(100);
-            return { success: true };
-          }
-          // Wait for loading to finish if there's a loading indicator
-          if (this.bindings.LOADING) {
-            await this.waitForCondition({ gone: this.bindings.LOADING.exists }, 10000);
-          }
-          return await this.waitForCondition(this.bindings.DETAILS_LOADED);
+        // Waiting (2)
+        case 'WAIT_FOR':
+          return await this.executeWaitFor(command.target);
           
         case 'WAIT':
           await this.wait(command.seconds * 1000);
           return { success: true };
         
-        // Going To
-        case 'GO_TO_SEARCH_BOX':
-          if (!this.bindings.SEARCH_BOX) {
-            return { success: false, error: 'SEARCH_BOX binding not defined' };
-          }
-          this.context.currentElement = await this.findElement(this.bindings.SEARCH_BOX);
-          return { success: !!this.context.currentElement };
+        // Focus (3)
+        case 'GO_TO':
+          return await this.goToElement(command);
           
         case 'GO_TO_FILTER':
           if (!this.bindings.FILTERS?.[command.name]) {
@@ -251,24 +229,10 @@ export class RecipeExecutor {
           }
           return { success: true };
           
-        case 'GO_TO':
-          return await this.goToElement(command);
-          
-        case 'GO_TO_LIST':
-          this.context.currentElement = await this.findElement(this.bindings.LIST);
-          return { success: !!this.context.currentElement };
-          
         case 'GO_TO_ITEM':
           return await this.goToItem(command.which);
-          
-        case 'GO_TO_DETAILS':
-          if (!this.bindings.DETAILS_PANEL) {
-            return { success: false, error: 'DETAILS_PANEL binding not defined' };
-          }
-          this.context.currentElement = await this.findElement(this.bindings.DETAILS_PANEL);
-          return { success: !!this.context.currentElement };
         
-        // Actions
+        // Actions (6)
         case 'TYPE':
           if (!this.context.currentElement) {
             return { success: false, error: 'No element focused for TYPE' };
@@ -281,24 +245,24 @@ export class RecipeExecutor {
           return { success: true };
           
         case 'CLICK':
+          // In FOR_EACH context, click current item; otherwise click focused element
+          if (this.context.currentItem) {
+            // If click behavior is "inline", we don't need to actually click
+            if (this.bindings.CLICK_BEHAVIOR === 'inline') {
+              logger.debug('Inline mode: skipping click, content is in item');
+              return { success: true };
+            }
+            await this.clickElement(this.context.currentItem.element);
+            return { success: true };
+          }
           if (!this.context.currentElement) {
             return { success: false, error: 'No element focused for CLICK' };
           }
           await this.clickElement(this.context.currentElement);
           return { success: true };
           
-        case 'CLICK_ITEM':
-          if (!this.context.currentItem) {
-            return { success: false, error: 'No current item for CLICK_ITEM' };
-          }
-          // If click behavior is "inline", we don't need to actually click
-          // The content is already visible in the item
-          if (this.bindings.CLICK_BEHAVIOR === 'inline') {
-            logger.debug('Inline mode: skipping click, content is in item');
-            return { success: true };
-          }
-          await this.clickElement(this.context.currentItem.element);
-          return { success: true };
+        case 'CLICK_IF_EXISTS':
+          return await this.executeClickIfExists(command);
           
         case 'SELECT':
           if (!this.context.currentElement) {
@@ -314,43 +278,23 @@ export class RecipeExecutor {
           await this.clearElement(this.context.currentElement);
           return { success: true };
           
-        case 'CHECK':
+        case 'SET_CHECKED':
           if (!this.context.currentElement) {
-            return { success: false, error: 'No element focused for CHECK' };
+            return { success: false, error: 'No element focused for SET_CHECKED' };
           }
-          await this.setCheckboxState(this.context.currentElement, true);
-          return { success: true };
-          
-        case 'UNCHECK':
-          if (!this.context.currentElement) {
-            return { success: false, error: 'No element focused for UNCHECK' };
-          }
-          await this.setCheckboxState(this.context.currentElement, false);
+          await this.setCheckboxState(this.context.currentElement, command.checked);
           return { success: true };
             
-        // Scrolling
-        case 'SCROLL_DOWN':
-          await this.scroll('down');
-          return { success: true };
+        // Scrolling (2)
+        case 'SCROLL':
+          return await this.executeScroll(command);
           
-        case 'SCROLL_UP':
-          await this.scroll('up');
-          return { success: true };
-          
-        case 'SCROLL_FOR_MORE':
-          return await this.scrollForMore();
-          
-        case 'SCROLL_TO_TOP':
-          await this.page.scrollToPercent(0);
-          return { success: true };
-          
-        case 'SCROLL_TO_BOTTOM':
-          await this.page.scrollToPercent(100);
-          return { success: true };
+        case 'SCROLL_IF_NOT_END':
+          return await this.executeScrollIfNotEnd(command);
         
-        // Data
+        // Data (3)
         case 'EXTRACT_DETAILS':
-          return await this.extractDetails();
+          return await this.extractDetails(command.selectors);
           
         case 'SAVE':
           return this.saveCurrentItem(command.as);
@@ -362,29 +306,20 @@ export class RecipeExecutor {
           }
           return { success: true };
         
-        // Flow Control
+        // Flow Control (5)
         case 'FOR_EACH_ITEM_IN_LIST':
           return await this.executeForEach(command);
           
-        case 'WHEN_LIST_EXHAUSTED':
-          // Check if list is exhausted, then run body
-          const exhausted = await this.checkCondition(this.bindings.NO_MORE_ITEMS);
-          if (exhausted) {
-            for (const cmd of command.body) {
-              await this.executeCommand(cmd);
-            }
-          }
-          return { success: true };
+        case 'IF':
+          return await this.executeIf(command);
           
-        case 'IF_NEW_ITEMS':
-          return await this.executeIfNewItems(command);
+        case 'CHECKPOINT_COUNT':
+          this.context.checkpointItemCount = await this.getItemCount();
+          logger.debug(`Checkpoint: saved item count = ${this.context.checkpointItemCount}`);
+          return { success: true };
           
         case 'REPEAT':
           return await this.executeRepeat(command);
-          
-        case 'CONTINUE':
-          this.context.shouldContinue = true;
-          return { success: true };
           
         case 'END':
           this.context.shouldStop = true;
@@ -411,7 +346,7 @@ export class RecipeExecutor {
       currentItem: null,
       currentItemIndex: -1,
       extractedContent: null,
-      lastItemCount: 0,
+      checkpointItemCount: 0,
       noNewItemsCount: 0,
       shouldStop: false,
       shouldContinue: false,
@@ -564,10 +499,85 @@ export class RecipeExecutor {
     }
   }
   
+  /**
+   * WAIT_FOR - unified wait command
+   */
+  private async executeWaitFor(target: WaitTarget): Promise<CommandResult> {
+    switch (target) {
+      case 'page':
+        return await this.waitForCondition(this.bindings.PAGE_LOADED || { exists: 'body' });
+        
+      case 'list':
+        // Fall back to waiting for LIST_ITEM if LIST_LOADED not defined
+        return await this.waitForCondition(
+          this.bindings.LIST_LOADED || { exists: this.bindings.LIST_ITEM }
+        );
+        
+      case 'listUpdate':
+        return await this.waitForCondition(
+          this.bindings.LIST_UPDATED || { countChanged: this.bindings.LIST_ITEM }
+        );
+        
+      case 'details':
+        // If click behavior is "inline", details are already visible in the item
+        if (this.bindings.CLICK_BEHAVIOR === 'inline') {
+          await this.wait(100);
+          return { success: true };
+        }
+        // Wait for loading to finish if there's a loading indicator
+        if (this.bindings.LOADING) {
+          await this.waitForCondition({ gone: this.bindings.LOADING.exists }, 10000);
+        }
+        // Wait for the details panel to appear
+        const result = await this.waitForCondition(
+          this.bindings.DETAILS_LOADED || { exists: this.bindings.DETAILS_PANEL || 'body' }
+        );
+        if (result.success) {
+          // Give content inside the panel time to render
+          // Many sites show the container first, then lazily load content
+          await this.wait(300);
+        }
+        return result;
+        
+      default:
+        return { success: false, error: `Unknown wait target: ${target}` };
+    }
+  }
+  
+  /**
+   * GO_TO - unified element focus
+   * Handles built-in names: 'searchBox', 'list', 'details'
+   * Also handles custom ELEMENTS bindings
+   */
   private async goToElement(command: GoToCommand): Promise<CommandResult> {
-    const selector = this.bindings.ELEMENTS?.[command.name];
-    if (!selector) {
-      return { success: false, error: `Element "${command.name}" not defined in ELEMENTS bindings` };
+    let selector: string | undefined;
+    
+    // Check built-in names first
+    switch (command.name) {
+      case 'searchBox':
+        selector = this.bindings.SEARCH_BOX;
+        if (!selector) {
+          return { success: false, error: 'SEARCH_BOX binding not defined' };
+        }
+        break;
+        
+      case 'list':
+        selector = this.bindings.LIST;
+        break;
+        
+      case 'details':
+        selector = this.bindings.DETAILS_PANEL;
+        if (!selector) {
+          return { success: false, error: 'DETAILS_PANEL binding not defined' };
+        }
+        break;
+        
+      default:
+        // Check ELEMENTS bindings
+        selector = this.bindings.ELEMENTS?.[command.name];
+        if (!selector) {
+          return { success: false, error: `Element "${command.name}" not defined in ELEMENTS bindings` };
+        }
     }
     
     this.context.currentElement = await this.findElement(selector);
@@ -578,52 +588,6 @@ export class RecipeExecutor {
     return { success: true };
   }
   
-  private async scroll(direction: 'up' | 'down'): Promise<void> {
-    if (direction === 'down') {
-      await this.page.scrollToNextPage();
-    } else {
-      await this.page.scrollToPreviousPage();
-    }
-    this.stats.scrollsPerformed++;
-  }
-  
-  private async scrollForMore(): Promise<CommandResult> {
-    const countBefore = await this.getItemCount();
-    this.context.lastItemCount = countBefore;
-    
-    if (this.bindings.SCROLL_BEHAVIOR === 'infinite') {
-      await this.scroll('down');
-      await this.wait(2000);
-    } else if (this.bindings.SCROLL_BEHAVIOR === 'load_more_button' && this.bindings.LOAD_MORE_BUTTON) {
-      const button = await this.findElement(this.bindings.LOAD_MORE_BUTTON);
-      if (button) {
-        await this.clickElement(button);
-        await this.wait(2000);
-      }
-    } else if (this.bindings.SCROLL_BEHAVIOR === 'paginated' && this.bindings.NEXT_PAGE_BUTTON) {
-      const button = await this.findElement(this.bindings.NEXT_PAGE_BUTTON);
-      if (button) {
-        await this.clickElement(button);
-        await this.wait(2000);
-      }
-    }
-    
-    const countAfter = await this.getItemCount();
-    
-    if (countAfter <= countBefore) {
-      this.context.noNewItemsCount++;
-    } else {
-      this.context.noNewItemsCount = 0;
-    }
-    
-    return { 
-      success: true, 
-      data: { 
-        newItems: countAfter - countBefore,
-        total: countAfter,
-      }
-    };
-  }
   
   private async getItemCount(): Promise<number> {
     return await this.countElements(this.bindings.LIST_ITEM);
@@ -726,31 +690,36 @@ export class RecipeExecutor {
     return `item_${itemData.index ?? Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   }
   
-  private async extractDetails(): Promise<CommandResult> {
+  private async extractDetails(_commandSelectors?: string[]): Promise<CommandResult> {
     let content = '';
     
-    // If we have a current item with text, use that first (inline mode)
-    if (this.context.currentItem) {
-      const itemData = this.context.currentItem.element as { text?: string; href?: string };
-      if (itemData.text) {
-        content = itemData.text;
-        logger.debug(`Extracted from current item: ${content.slice(0, 100)}...`);
+    // Simple approach: Just get ALL text from DETAILS_PANEL
+    // Let the LLM (in runner) parse the structured data from raw text
+    if (this.bindings.DETAILS_PANEL) {
+      // Retry logic: content might still be loading
+      const maxRetries = 3;
+      for (let retry = 0; retry < maxRetries; retry++) {
+        const panelText = await this.getTextFromSelector(this.bindings.DETAILS_PANEL);
+        if (panelText && panelText.trim()) {
+          content = panelText.trim();
+          logger.debug(`Extracted ${content.length} chars from DETAILS_PANEL`);
+          break;
+        }
+        
+        // No content yet - wait and retry
+        if (retry < maxRetries - 1) {
+          logger.debug(`No content on attempt ${retry + 1}, waiting before retry...`);
+          await this.wait(500);
+        }
       }
     }
     
-    // Also try to extract from DETAILS_CONTENT selectors
-    const selectors = this.bindings.DETAILS_CONTENT;
-    if (selectors && selectors.length > 0) {
-      for (const selector of selectors) {
-        const text = await this.getTextFromSelector(selector);
-        if (text && text.trim()) {
-          // If it's the same selector as current item, skip to avoid duplication
-          const itemSelector = (this.context.currentItem?.element as { selector?: string })?.selector;
-          if (selector === itemSelector && content) {
-            continue;
-          }
-          content += (content ? '\n\n' : '') + text;
-        }
+    // Fallback: use current item text (list item text)
+    if (!content.trim() && this.context.currentItem) {
+      const itemData = this.context.currentItem.element as { text?: string; href?: string };
+      if (itemData.text) {
+        content = itemData.text;
+        logger.debug(`Fallback: extracted from current item: ${content.slice(0, 100)}...`);
       }
     }
     
@@ -822,7 +791,7 @@ export class RecipeExecutor {
     
     if (condition.countChanged) {
       const currentCount = await this.countElements(condition.countChanged);
-      return currentCount !== this.context.lastItemCount;
+      return currentCount !== this.context.checkpointItemCount;
     }
     
     if (condition.and) {
@@ -925,20 +894,6 @@ export class RecipeExecutor {
     return { success: true };
   }
   
-  private async executeIfNewItems(command: IfNewItemsCommand): Promise<CommandResult> {
-    const currentCount = await this.getItemCount();
-    const hasNewItems = currentCount > this.context.lastItemCount;
-    
-    const commands = hasNewItems ? command.then : (command.else || []);
-    
-    for (const cmd of commands) {
-      if (this.context.shouldStop) break;
-      await this.executeCommand(cmd);
-    }
-    
-    return { success: true };
-  }
-  
   private async executeRepeat(command: RepeatCommand): Promise<CommandResult> {
     let iteration = 0;
     const maxIterations = 50; // Safety limit
@@ -975,6 +930,263 @@ export class RecipeExecutor {
     return { success: true };
   }
   
+  /**
+   * Execute IF command - generic conditional
+   */
+  private async executeIf(command: IfCommand): Promise<CommandResult> {
+    const conditionMet = await this.evaluateCondition(command.condition);
+    const commands = conditionMet ? command.then : (command.else || []);
+    
+    for (const cmd of commands) {
+      if (this.context.shouldStop) break;
+      const result = await this.executeCommand(cmd);
+      if (!result.success) {
+        return result;
+      }
+    }
+    
+    return { success: true };
+  }
+  
+  /**
+   * Evaluate a Condition for IF command
+   */
+  private async evaluateCondition(condition: Condition): Promise<boolean> {
+    switch (condition.type) {
+      case 'LIST_END':
+        return await this.isListAtEnd();
+        
+      case 'PAGE_END':
+        return await this.isPageAtEnd();
+        
+      case 'NEW_ITEMS': {
+        const currentCount = await this.getItemCount();
+        return currentCount > this.context.checkpointItemCount;
+      }
+        
+      case 'EXISTS': {
+        const selector = this.resolveBindingName(condition.name);
+        if (!selector) return false;
+        return await this.evaluateSelector(selector);
+      }
+        
+      case 'VISIBLE': {
+        const selector = this.resolveBindingName(condition.name);
+        if (!selector) return false;
+        return await this.isElementVisible(selector);
+      }
+        
+      case 'NOT':
+        return !(await this.evaluateCondition(condition.condition));
+        
+      case 'AND':
+        for (const c of condition.conditions) {
+          if (!(await this.evaluateCondition(c))) return false;
+        }
+        return true;
+        
+      case 'OR':
+        for (const c of condition.conditions) {
+          if (await this.evaluateCondition(c)) return true;
+        }
+        return false;
+        
+      default:
+        logger.warning(`Unknown condition type: ${(condition as Condition).type}`);
+        return false;
+    }
+  }
+  
+  /**
+   * Resolve a binding name to a selector
+   * Supports built-in names and custom ELEMENTS bindings
+   */
+  private resolveBindingName(name: string): string | null {
+    // Built-in binding names
+    switch (name) {
+      case 'nextPageButton':
+        return this.bindings.NEXT_PAGE_BUTTON || null;
+      case 'loadMoreButton':
+        return this.bindings.LOAD_MORE_BUTTON || null;
+      case 'list':
+        return this.bindings.LIST;
+      case 'listItem':
+        return this.bindings.LIST_ITEM;
+      case 'detailsPanel':
+        return this.bindings.DETAILS_PANEL || null;
+      case 'searchBox':
+        return this.bindings.SEARCH_BOX || null;
+    }
+    
+    // Custom ELEMENTS bindings
+    if (this.bindings.ELEMENTS?.[name]) {
+      return this.bindings.ELEMENTS[name];
+    }
+    
+    return null;
+  }
+  
+  /**
+   * Check if list container is scrolled to the end
+   */
+  private async isListAtEnd(): Promise<boolean> {
+    const scrollContainer = this.bindings.SCROLL_CONTAINER;
+    if (!scrollContainer) {
+      // No specific scroll container, check page scroll
+      return await this.isPageAtEnd();
+    }
+    
+    // Check if scroll container is at the bottom by evaluating in page
+    const state = await this.page.getState();
+    // Use scroll info from state if available
+    const scrollHeight = state.scrollHeight || 0;
+    const scrollY = state.scrollY || 0;
+    const viewportHeight = state.visualViewportHeight || 0;
+    
+    // Consider at end if we're within 50px of bottom
+    return scrollY + viewportHeight >= scrollHeight - 50;
+  }
+  
+  /**
+   * Check if page is scrolled to the end
+   */
+  private async isPageAtEnd(): Promise<boolean> {
+    const state = await this.page.getState();
+    const scrollHeight = state.scrollHeight || 0;
+    const scrollY = state.scrollY || 0;
+    const viewportHeight = state.visualViewportHeight || 0;
+    
+    // Consider at end if we're within 50px of bottom
+    return scrollY + viewportHeight >= scrollHeight - 50;
+  }
+  
+  /**
+   * Check if an element is visible in the viewport
+   * Falls back to checking if element exists since we don't have visibility check
+   */
+  private async isElementVisible(selector: string): Promise<boolean> {
+    // For now, just check if element exists
+    // A more sophisticated check would verify it's in viewport
+    return await this.evaluateSelector(selector);
+  }
+  
+  /**
+   * Execute SCROLL command with explicit target
+   */
+  private async executeScroll(command: ScrollCommand): Promise<CommandResult> {
+    if (command.target === 'list') {
+      await this.scrollList(command.direction);
+    } else {
+      await this.scrollPage(command.direction);
+    }
+    this.stats.scrollsPerformed++;
+    return { success: true };
+  }
+  
+  /**
+   * Execute SCROLL_IF_NOT_END command
+   */
+  private async executeScrollIfNotEnd(command: ScrollIfNotEndCommand): Promise<CommandResult> {
+    const atEnd = command.target === 'list' 
+      ? await this.isListAtEnd() 
+      : await this.isPageAtEnd();
+    
+    if (!atEnd) {
+      if (command.target === 'list') {
+        await this.scrollList('down');
+      } else {
+        await this.scrollPage('down');
+      }
+      this.stats.scrollsPerformed++;
+      return { success: true, data: { scrolled: true } };
+    }
+    
+    return { success: true, data: { scrolled: false } };
+  }
+  
+  /**
+   * Scroll the list container
+   */
+  private async scrollList(direction: 'up' | 'down'): Promise<void> {
+    const scrollContainer = this.bindings.SCROLL_CONTAINER;
+    if (scrollContainer) {
+      // Find the scroll container element and scroll it
+      const containerElement = await this.getScrollContainerElement();
+      if (containerElement) {
+        if (direction === 'down') {
+          await this.page.scrollToNextPage(containerElement);
+        } else {
+          await this.page.scrollToPreviousPage(containerElement);
+        }
+        return;
+      }
+    }
+    // Fallback to page scroll if no container specified or found
+    await this.scrollPage(direction);
+  }
+  
+  /**
+   * Get the scroll container element if defined
+   */
+  private async getScrollContainerElement(): Promise<DOMElementNode | undefined> {
+    const scrollContainer = this.bindings.SCROLL_CONTAINER;
+    if (!scrollContainer) return undefined;
+    
+    const state = await this.page.getState();
+    // Find element by matching the scroll container selector
+    const findElement = (node: DOMElementNode): DOMElementNode | undefined => {
+      // Check if this element matches the selector (simplified check)
+      const classes = node.attributes.class || '';
+      const selectorClass = scrollContainer.replace('.', '').split(' ')[0];
+      if (classes.includes(selectorClass)) {
+        return node;
+      }
+      // Search children
+      for (const child of node.children) {
+        if (child instanceof DOMElementNode) {
+          const found = findElement(child);
+          if (found) return found;
+        }
+      }
+      return undefined;
+    };
+    
+    return findElement(state.elementTree);
+  }
+  
+  /**
+   * Scroll the page
+   */
+  private async scrollPage(direction: 'up' | 'down'): Promise<void> {
+    if (direction === 'down') {
+      await this.page.scrollToNextPage();
+    } else {
+      await this.page.scrollToPreviousPage();
+    }
+  }
+  
+  /**
+   * Execute CLICK_IF_EXISTS command - safe click that doesn't fail if missing
+   */
+  private async executeClickIfExists(command: ClickIfExistsCommand): Promise<CommandResult> {
+    const selector = this.resolveBindingName(command.name);
+    
+    if (!selector) {
+      logger.debug(`CLICK_IF_EXISTS: binding "${command.name}" not defined, skipping`);
+      return { success: true, data: { clicked: false } };
+    }
+    
+    const exists = await this.evaluateSelector(selector);
+    if (!exists) {
+      logger.debug(`CLICK_IF_EXISTS: element "${command.name}" not found, skipping`);
+      return { success: true, data: { clicked: false } };
+    }
+    
+    await this.clickElement(selector);
+    logger.debug(`CLICK_IF_EXISTS: clicked "${command.name}"`);
+    return { success: true, data: { clicked: true } };
+  }
+  
   // ============================================================================
   // Binding Error Recovery
   // ============================================================================
@@ -1009,18 +1221,23 @@ export class RecipeExecutor {
   
   private getBindingForCommand(command: Command): string | null {
     switch (command.type) {
-      case 'WAIT_FOR_LIST':
-      case 'GO_TO_LIST':
-        return 'LIST';
-      case 'WAIT_FOR_DETAILS':
-      case 'GO_TO_DETAILS':
-        return 'DETAILS_LOADED';
-      case 'GO_TO_SEARCH_BOX':
-        return 'SEARCH_BOX';
+      case 'WAIT_FOR':
+        switch (command.target) {
+          case 'list': return 'LIST_LOADED';
+          case 'details': return 'DETAILS_LOADED';
+          case 'page': return 'PAGE_LOADED';
+          case 'listUpdate': return 'LIST_UPDATED';
+          default: return null;
+        }
+      case 'GO_TO':
+        switch (command.name) {
+          case 'list': return 'LIST';
+          case 'details': return 'DETAILS_PANEL';
+          case 'searchBox': return 'SEARCH_BOX';
+          default: return 'ELEMENTS';
+        }
       case 'EXTRACT_DETAILS':
         return 'DETAILS_CONTENT';
-      case 'SCROLL_FOR_MORE':
-        return 'SCROLL_BEHAVIOR';
       default:
         return null;
     }

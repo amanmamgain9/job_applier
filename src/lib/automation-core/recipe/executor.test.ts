@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { RecipeExecutor } from './executor';
-import { cmd, until, type Recipe, type Command } from './commands';
+import { cmd, until, when, type Recipe, type Command } from './commands';
 import type { Page } from '../browser/page';
 import { 
   createMockPage, 
@@ -59,19 +59,6 @@ describe('RecipeExecutor', () => {
       expect(mockPage._mocks.goBack).toHaveBeenCalled();
     });
 
-    it('REFRESH should navigate to current URL', async () => {
-      const executor = new RecipeExecutor(asPage(mockPage), createMinimalBindings());
-      const currentUrl = mockPage._state.currentUrl;
-      const recipe: Recipe = {
-        id: 'test',
-        name: 'Test',
-        commands: [cmd.refresh()],
-      };
-
-      await executor.execute(recipe);
-
-      expect(mockPage._mocks.navigateTo).toHaveBeenCalledWith(currentUrl);
-    });
   });
 
   // ============================================================================
@@ -79,12 +66,12 @@ describe('RecipeExecutor', () => {
   // ============================================================================
 
   describe('Scrolling Commands', () => {
-    it('SCROLL_DOWN should call scrollToNextPage', async () => {
+    it('SCROLL page down should call scrollToNextPage', async () => {
       const executor = new RecipeExecutor(asPage(mockPage), createMinimalBindings());
       const recipe: Recipe = {
         id: 'test',
         name: 'Test',
-        commands: [cmd.scrollDown()],
+        commands: [cmd.scrollPage('down')],
       };
 
       await executor.execute(recipe);
@@ -92,43 +79,17 @@ describe('RecipeExecutor', () => {
       expect(mockPage._mocks.scrollToNextPage).toHaveBeenCalled();
     });
 
-    it('SCROLL_UP should call scrollToPreviousPage', async () => {
+    it('SCROLL page up should call scrollToPreviousPage', async () => {
       const executor = new RecipeExecutor(asPage(mockPage), createMinimalBindings());
       const recipe: Recipe = {
         id: 'test',
         name: 'Test',
-        commands: [cmd.scrollUp()],
+        commands: [cmd.scrollPage('up')],
       };
 
       await executor.execute(recipe);
 
       expect(mockPage._mocks.scrollToPreviousPage).toHaveBeenCalled();
-    });
-
-    it('SCROLL_TO_TOP should scroll to 0%', async () => {
-      const executor = new RecipeExecutor(asPage(mockPage), createMinimalBindings());
-      const recipe: Recipe = {
-        id: 'test',
-        name: 'Test',
-        commands: [cmd.scrollToTop()],
-      };
-
-      await executor.execute(recipe);
-
-      expect(mockPage._mocks.scrollToPercent).toHaveBeenCalledWith(0);
-    });
-
-    it('SCROLL_TO_BOTTOM should scroll to 100%', async () => {
-      const executor = new RecipeExecutor(asPage(mockPage), createMinimalBindings());
-      const recipe: Recipe = {
-        id: 'test',
-        name: 'Test',
-        commands: [cmd.scrollToBottom()],
-      };
-
-      await executor.execute(recipe);
-
-      expect(mockPage._mocks.scrollToPercent).toHaveBeenCalledWith(100);
     });
 
     it('should track scroll count in stats', async () => {
@@ -137,9 +98,9 @@ describe('RecipeExecutor', () => {
         id: 'test',
         name: 'Test',
         commands: [
-          cmd.scrollDown(),
-          cmd.scrollDown(),
-          cmd.scrollUp(),
+          cmd.scrollPage('down'),
+          cmd.scrollPage('down'),
+          cmd.scrollPage('up'),
         ],
       };
 
@@ -193,7 +154,7 @@ describe('RecipeExecutor', () => {
         id: 'test',
         name: 'Test',
         commands: [
-          cmd.goToSearchBox(),
+          cmd.goTo('searchBox'),
           cmd.clear(),
         ],
       };
@@ -206,45 +167,30 @@ describe('RecipeExecutor', () => {
   });
 
   // ============================================================================
-  // Checkbox Commands (CHECK/UNCHECK)
+  // Checkbox Commands (SET_CHECKED)
   // ============================================================================
 
   describe('Checkbox Commands', () => {
-    it('CHECK should fail if no element is focused', async () => {
+    it('SET_CHECKED should fail if no element is focused', async () => {
       const executor = new RecipeExecutor(asPage(mockPage), createMinimalBindings());
       const recipe: Recipe = {
         id: 'test',
         name: 'Test',
-        commands: [cmd.check()],
+        commands: [cmd.setChecked(true)],
       };
 
       const result = await executor.execute(recipe);
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain('No element focused for CHECK');
+      expect(result.error).toContain('No element focused for SET_CHECKED');
     });
 
-    it('UNCHECK should fail if no element is focused', async () => {
-      const executor = new RecipeExecutor(asPage(mockPage), createMinimalBindings());
-      const recipe: Recipe = {
-        id: 'test',
-        name: 'Test',
-        commands: [cmd.uncheck()],
-      };
-
-      const result = await executor.execute(recipe);
-
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('No element focused for UNCHECK');
-    });
-
-    it('CHECK should attempt to set checkbox state', async () => {
+    it('SET_CHECKED(true) should attempt to set checkbox state', async () => {
       const checkboxElement = createCheckboxElement(0, 'Remote only', false);
       mockPage = createMockPage({
         elements: [checkboxElement],
       });
       
-      // Make selectorExists return true for the filter selector
       mockPage._mocks.selectorExists.mockResolvedValue(true);
       
       const bindings = createMinimalBindings({
@@ -263,17 +209,16 @@ describe('RecipeExecutor', () => {
         name: 'Test',
         commands: [
           cmd.goToFilter('remote'),
-          cmd.check(),
+          cmd.setChecked(true),
         ],
       };
 
       const result = await executor.execute(recipe);
 
-      // Command should succeed (whether or not click was needed depends on state)
       expect(result.stats.commandsExecuted).toBeGreaterThanOrEqual(2);
     });
 
-    it('UNCHECK should attempt to unset checkbox state', async () => {
+    it('SET_CHECKED(false) should attempt to unset checkbox state', async () => {
       const checkboxElement = createCheckboxElement(0, 'Remote only', true);
       mockPage = createMockPage({
         elements: [checkboxElement],
@@ -297,7 +242,7 @@ describe('RecipeExecutor', () => {
         name: 'Test',
         commands: [
           cmd.goToFilter('remote'),
-          cmd.uncheck(),
+          cmd.setChecked(false),
         ],
       };
 
@@ -567,7 +512,7 @@ describe('RecipeExecutor', () => {
         name: 'Test',
         commands: [
           cmd.repeat([
-            cmd.scrollDown(),
+            cmd.scrollPage('down'),
           ], until.maxScrolls(5)),
         ],
       };
@@ -618,10 +563,10 @@ describe('RecipeExecutor', () => {
         id: 'test',
         name: 'Test',
         commands: [
-          cmd.scrollDown(),
+          cmd.scrollPage('down'),
           cmd.end(),
-          cmd.scrollDown(), // Should not execute
-          cmd.scrollDown(), // Should not execute
+          cmd.scrollPage('down'), // Should not execute
+          cmd.scrollPage('down'), // Should not execute
         ],
       };
 
@@ -629,33 +574,7 @@ describe('RecipeExecutor', () => {
 
       expect(result.success).toBe(true);
       expect(result.stats.scrollsPerformed).toBe(1);
-      expect(result.stats.commandsExecuted).toBe(2); // scrollDown + end
-    });
-
-    it('CONTINUE should skip to next iteration in loop', async () => {
-      const elements = createJobListElements(3);
-      mockPage = createMockPage({ elements });
-      
-      const executor = new RecipeExecutor(asPage(mockPage), createMinimalBindings());
-      
-      // Custom command sequence that continues on first item
-      const recipe: Recipe = {
-        id: 'test',
-        name: 'Test',
-        commands: [
-          cmd.forEachItemInList([
-            cmd.extractDetails(),
-            cmd.continue(), // Skip save for all items
-            cmd.save('job'), // Should not execute
-          ]),
-        ],
-      };
-
-      const result = await executor.execute(recipe);
-
-      expect(result.success).toBe(true);
-      // Items should not be saved because continue skips save
-      expect(result.items).toHaveLength(0);
+      expect(result.stats.commandsExecuted).toBe(2); // scrollPage + end
     });
   });
 
@@ -692,9 +611,9 @@ describe('RecipeExecutor', () => {
         id: 'test',
         name: 'Test',
         commands: [
-          cmd.scrollDown(),
-          cmd.scrollDown(),
-          cmd.scrollUp(),
+          cmd.scrollPage('down'),
+          cmd.scrollPage('down'),
+          cmd.scrollPage('up'),
           cmd.submit(),
         ],
       };
@@ -789,6 +708,445 @@ describe('RecipeExecutor', () => {
       expect(result.success).toBe(false);
       // Should still have items from before the error
       expect(result.items.length).toBeGreaterThan(0);
+    });
+  });
+
+  // ============================================================================
+  // New Scroll Commands (SCROLL, SCROLL_IF_NOT_END)
+  // ============================================================================
+
+  describe('SCROLL Command', () => {
+    it('should scroll list down', async () => {
+      const executor = new RecipeExecutor(asPage(mockPage), createMinimalBindings({
+        SCROLL_CONTAINER: '.jobs-list',
+      }));
+      const recipe: Recipe = {
+        id: 'test',
+        name: 'Test',
+        commands: [cmd.scrollList('down')],
+      };
+
+      const result = await executor.execute(recipe);
+
+      expect(result.success).toBe(true);
+      expect(result.stats.scrollsPerformed).toBe(1);
+    });
+
+    it('should scroll page down', async () => {
+      const executor = new RecipeExecutor(asPage(mockPage), createMinimalBindings());
+      const recipe: Recipe = {
+        id: 'test',
+        name: 'Test',
+        commands: [cmd.scrollPage('down')],
+      };
+
+      const result = await executor.execute(recipe);
+
+      expect(result.success).toBe(true);
+      expect(mockPage._mocks.scrollToNextPage).toHaveBeenCalled();
+      expect(result.stats.scrollsPerformed).toBe(1);
+    });
+
+    it('should scroll page up', async () => {
+      const executor = new RecipeExecutor(asPage(mockPage), createMinimalBindings());
+      const recipe: Recipe = {
+        id: 'test',
+        name: 'Test',
+        commands: [cmd.scrollPage('up')],
+      };
+
+      const result = await executor.execute(recipe);
+
+      expect(result.success).toBe(true);
+      expect(mockPage._mocks.scrollToPreviousPage).toHaveBeenCalled();
+    });
+  });
+
+  // ============================================================================
+  // IF Command
+  // ============================================================================
+
+  describe('IF Command', () => {
+    it('should execute then branch when condition is true', async () => {
+      // Create fresh mock with element exists returning true
+      mockPage = createMockPage({ elements: createJobListElements(3) });
+      mockPage._mocks.selectorExists.mockResolvedValue(true);
+      
+      const bindings = createMinimalBindings({
+        // Use NEXT_PAGE_BUTTON (the built-in binding) not ELEMENTS
+        NEXT_PAGE_BUTTON: '.pagination-next',
+      });
+      const executor = new RecipeExecutor(asPage(mockPage), bindings);
+      
+      const recipe: Recipe = {
+        id: 'test',
+        name: 'Test',
+        commands: [
+          cmd.if(
+            when.exists('nextPageButton'),  // Uses built-in binding name
+            [cmd.scrollPage('down')],  // then: scroll
+            [cmd.end()]         // else: end
+          ),
+        ],
+      };
+
+      const result = await executor.execute(recipe);
+
+      expect(result.success).toBe(true);
+      expect(result.stats.scrollsPerformed).toBe(1);
+    });
+
+    it('should execute else branch when condition is false', async () => {
+      // Set up: element does not exist
+      mockPage._mocks.selectorExists.mockResolvedValue(false);
+      
+      const bindings = createMinimalBindings({
+        ELEMENTS: { nextPageButton: '.pagination-next' }
+      });
+      const executor = new RecipeExecutor(asPage(mockPage), bindings);
+      
+      const recipe: Recipe = {
+        id: 'test',
+        name: 'Test',
+        commands: [
+          cmd.if(
+            when.exists('nextPageButton'),
+            [cmd.scrollPage('down')],  // then: scroll
+            [cmd.scrollPage('up')]     // else: scroll up
+          ),
+        ],
+      };
+
+      const result = await executor.execute(recipe);
+
+      expect(result.success).toBe(true);
+      expect(mockPage._mocks.scrollToPreviousPage).toHaveBeenCalled();
+    });
+
+    it('should handle NOT condition', async () => {
+      mockPage._mocks.selectorExists.mockResolvedValue(false);
+      
+      const bindings = createMinimalBindings({
+        ELEMENTS: { loadingSpinner: '.spinner' }
+      });
+      const executor = new RecipeExecutor(asPage(mockPage), bindings);
+      
+      const recipe: Recipe = {
+        id: 'test',
+        name: 'Test',
+        commands: [
+          cmd.if(
+            when.not(when.exists('loadingSpinner')),  // NOT exists
+            [cmd.scrollPage('down')],  // then: proceed
+          ),
+        ],
+      };
+
+      const result = await executor.execute(recipe);
+
+      expect(result.success).toBe(true);
+      expect(result.stats.scrollsPerformed).toBe(1);
+    });
+
+    it('should handle NEW_ITEMS condition with checkpoint', async () => {
+      const elements = createJobListElements(3);
+      mockPage = createMockPage({ elements });
+      
+      // Start with 3 items
+      mockPage._mocks.countSelector.mockResolvedValue(3);
+      
+      const executor = new RecipeExecutor(asPage(mockPage), createMinimalBindings());
+      
+      const recipe: Recipe = {
+        id: 'test',
+        name: 'Test',
+        commands: [
+          cmd.checkpointCount(),  // Save count = 3
+          // Simulate new items appearing
+          cmd.if(
+            when.newItems(),
+            [cmd.scrollPage('down')],  // Should NOT execute (no new items yet)
+          ),
+        ],
+      };
+
+      const result = await executor.execute(recipe);
+
+      expect(result.success).toBe(true);
+      // No new items, so scroll should not happen
+      expect(result.stats.scrollsPerformed).toBe(0);
+    });
+
+    it('should detect new items after checkpoint', async () => {
+      const elements = createJobListElements(3);
+      mockPage = createMockPage({ elements });
+      
+      const executor = new RecipeExecutor(asPage(mockPage), createMinimalBindings());
+      
+      // First call: 3 items (checkpoint), second call: 5 items (new items!)
+      mockPage._mocks.countSelector
+        .mockResolvedValueOnce(3)
+        .mockResolvedValueOnce(5);
+      
+      const recipe: Recipe = {
+        id: 'test',
+        name: 'Test',
+        commands: [
+          cmd.checkpointCount(),  // Save count = 3
+          cmd.if(
+            when.newItems(),
+            [cmd.scrollPage('down')],  // SHOULD execute (5 > 3)
+          ),
+        ],
+      };
+
+      const result = await executor.execute(recipe);
+
+      expect(result.success).toBe(true);
+      expect(result.stats.scrollsPerformed).toBe(1);
+    });
+
+    it('should handle AND condition', async () => {
+      mockPage._mocks.selectorExists.mockResolvedValue(true);
+      
+      const bindings = createMinimalBindings({
+        ELEMENTS: { 
+          button1: '.btn1',
+          button2: '.btn2',
+        }
+      });
+      const executor = new RecipeExecutor(asPage(mockPage), bindings);
+      
+      const recipe: Recipe = {
+        id: 'test',
+        name: 'Test',
+        commands: [
+          cmd.if(
+            when.and(when.exists('button1'), when.exists('button2')),
+            [cmd.scrollPage('down')],
+          ),
+        ],
+      };
+
+      const result = await executor.execute(recipe);
+
+      expect(result.success).toBe(true);
+      expect(result.stats.scrollsPerformed).toBe(1);
+    });
+
+    it('should handle OR condition', async () => {
+      // First element doesn't exist, second does
+      mockPage._mocks.selectorExists
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true);
+      
+      const bindings = createMinimalBindings({
+        ELEMENTS: { 
+          button1: '.btn1',
+          button2: '.btn2',
+        }
+      });
+      const executor = new RecipeExecutor(asPage(mockPage), bindings);
+      
+      const recipe: Recipe = {
+        id: 'test',
+        name: 'Test',
+        commands: [
+          cmd.if(
+            when.or(when.exists('button1'), when.exists('button2')),
+            [cmd.scrollPage('down')],
+          ),
+        ],
+      };
+
+      const result = await executor.execute(recipe);
+
+      expect(result.success).toBe(true);
+      expect(result.stats.scrollsPerformed).toBe(1);
+    });
+  });
+
+  // ============================================================================
+  // CLICK_IF_EXISTS Command
+  // ============================================================================
+
+  describe('CLICK_IF_EXISTS Command', () => {
+    it('should click element if it exists', async () => {
+      mockPage._mocks.selectorExists.mockResolvedValue(true);
+      
+      const bindings = createMinimalBindings({
+        NEXT_PAGE_BUTTON: '.pagination-next',
+      });
+      const executor = new RecipeExecutor(asPage(mockPage), bindings);
+      
+      const recipe: Recipe = {
+        id: 'test',
+        name: 'Test',
+        commands: [cmd.clickIfExists('nextPageButton')],
+      };
+
+      const result = await executor.execute(recipe);
+
+      expect(result.success).toBe(true);
+      expect(mockPage._mocks.clickSelector).toHaveBeenCalledWith('.pagination-next');
+    });
+
+    it('should not fail if element does not exist', async () => {
+      mockPage._mocks.selectorExists.mockResolvedValue(false);
+      
+      const bindings = createMinimalBindings({
+        NEXT_PAGE_BUTTON: '.pagination-next',
+      });
+      const executor = new RecipeExecutor(asPage(mockPage), bindings);
+      
+      const recipe: Recipe = {
+        id: 'test',
+        name: 'Test',
+        commands: [cmd.clickIfExists('nextPageButton')],
+      };
+
+      const result = await executor.execute(recipe);
+
+      expect(result.success).toBe(true);
+      expect(mockPage._mocks.clickSelector).not.toHaveBeenCalled();
+    });
+
+    it('should not fail if binding is not defined', async () => {
+      const executor = new RecipeExecutor(asPage(mockPage), createMinimalBindings());
+      
+      const recipe: Recipe = {
+        id: 'test',
+        name: 'Test',
+        commands: [cmd.clickIfExists('nonExistentButton')],
+      };
+
+      const result = await executor.execute(recipe);
+
+      expect(result.success).toBe(true);
+      expect(mockPage._mocks.clickSelector).not.toHaveBeenCalled();
+    });
+
+    it('should use ELEMENTS binding for custom buttons', async () => {
+      mockPage._mocks.selectorExists.mockResolvedValue(true);
+      
+      const bindings = createMinimalBindings({
+        ELEMENTS: { showMoreButton: '.show-more' }
+      });
+      const executor = new RecipeExecutor(asPage(mockPage), bindings);
+      
+      const recipe: Recipe = {
+        id: 'test',
+        name: 'Test',
+        commands: [cmd.clickIfExists('showMoreButton')],
+      };
+
+      const result = await executor.execute(recipe);
+
+      expect(result.success).toBe(true);
+      expect(mockPage._mocks.clickSelector).toHaveBeenCalledWith('.show-more');
+    });
+  });
+
+  // ============================================================================
+  // CHECKPOINT_COUNT Command
+  // ============================================================================
+
+  describe('CHECKPOINT_COUNT Command', () => {
+    it('should save current item count', async () => {
+      mockPage._mocks.countSelector.mockResolvedValue(10);
+      
+      const executor = new RecipeExecutor(asPage(mockPage), createMinimalBindings());
+      
+      const recipe: Recipe = {
+        id: 'test',
+        name: 'Test',
+        commands: [cmd.checkpointCount()],
+      };
+
+      const result = await executor.execute(recipe);
+
+      expect(result.success).toBe(true);
+      expect(mockPage._mocks.countSelector).toHaveBeenCalled();
+    });
+  });
+
+  // ============================================================================
+  // Integration: Hybrid Scroll + Pagination Pattern
+  // ============================================================================
+
+  describe('Hybrid Scroll + Pagination Pattern', () => {
+    it('should scroll first, then paginate when scroll produces no new items', async () => {
+      const elements = createJobListElements(5);
+      mockPage = createMockPage({ elements });
+      
+      // Simulate: scroll produces no new items, but pagination button exists
+      mockPage._mocks.countSelector.mockResolvedValue(5); // Always 5 items (no new from scroll)
+      mockPage._mocks.selectorExists.mockResolvedValue(true); // Button exists
+      
+      const bindings = createMinimalBindings({
+        NEXT_PAGE_BUTTON: '.pagination-next',
+      });
+      const executor = new RecipeExecutor(asPage(mockPage), bindings);
+      
+      const recipe: Recipe = {
+        id: 'test',
+        name: 'Test',
+        commands: [
+          // This is the pattern: checkpoint, scroll, check, fallback to pagination
+          cmd.checkpointCount(),
+          cmd.scrollPage('down'),
+          cmd.wait(0.1),
+          cmd.if(
+            when.not(when.newItems()),
+            [cmd.clickIfExists('nextPageButton')],
+          ),
+        ],
+      };
+
+      const result = await executor.execute(recipe);
+
+      expect(result.success).toBe(true);
+      // Should have scrolled
+      expect(mockPage._mocks.scrollToNextPage).toHaveBeenCalled();
+      // Should have clicked pagination (since no new items)
+      expect(mockPage._mocks.clickSelector).toHaveBeenCalledWith('.pagination-next');
+    });
+
+    it('should not paginate if scroll produced new items', async () => {
+      const elements = createJobListElements(5);
+      mockPage = createMockPage({ elements });
+      
+      // Simulate: scroll produces new items
+      mockPage._mocks.countSelector
+        .mockResolvedValueOnce(5)  // checkpoint: 5 items
+        .mockResolvedValueOnce(8); // after scroll: 8 items (new!)
+      mockPage._mocks.selectorExists.mockResolvedValue(true);
+      
+      const bindings = createMinimalBindings({
+        NEXT_PAGE_BUTTON: '.pagination-next',
+      });
+      const executor = new RecipeExecutor(asPage(mockPage), bindings);
+      
+      const recipe: Recipe = {
+        id: 'test',
+        name: 'Test',
+        commands: [
+          cmd.checkpointCount(),
+          cmd.scrollPage('down'),
+          cmd.wait(0.1),
+          cmd.if(
+            when.not(when.newItems()),  // No new items? Then paginate
+            [cmd.clickIfExists('nextPageButton')],
+          ),
+        ],
+      };
+
+      const result = await executor.execute(recipe);
+
+      expect(result.success).toBe(true);
+      expect(mockPage._mocks.scrollToNextPage).toHaveBeenCalled();
+      // Should NOT click pagination (since scroll produced new items)
+      expect(mockPage._mocks.clickSelector).not.toHaveBeenCalled();
     });
   });
 });

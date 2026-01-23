@@ -12,42 +12,47 @@
 // Navigation
 export interface OpenPageCommand { type: 'OPEN_PAGE'; url: string }
 export interface GoBackCommand { type: 'GO_BACK' }
-export interface RefreshCommand { type: 'REFRESH' }
 
 // Waiting
-export interface WaitForPageCommand { type: 'WAIT_FOR_PAGE' }
-export interface WaitForListCommand { type: 'WAIT_FOR_LIST' }
-export interface WaitForListUpdateCommand { type: 'WAIT_FOR_LIST_UPDATE' }
-export interface WaitForDetailsCommand { type: 'WAIT_FOR_DETAILS' }
+export type WaitTarget = 'page' | 'list' | 'listUpdate' | 'details';
+export interface WaitForCommand { type: 'WAIT_FOR'; target: WaitTarget }
 export interface WaitCommand { type: 'WAIT'; seconds: number }
 
-// Going To (focus on element)
-export interface GoToSearchBoxCommand { type: 'GO_TO_SEARCH_BOX' }
-export interface GoToFilterCommand { type: 'GO_TO_FILTER'; name: string }
-export interface GoToCommand { type: 'GO_TO'; name: string }
-export interface GoToListCommand { type: 'GO_TO_LIST' }
-export interface GoToItemCommand { type: 'GO_TO_ITEM'; which: 'first' | 'next' | 'current' | 'unprocessed' }
-export interface GoToDetailsCommand { type: 'GO_TO_DETAILS' }
+// Focus (sets currentElement for subsequent actions)
+export interface GoToCommand { type: 'GO_TO'; name: string }  // 'searchBox', 'list', or ELEMENTS key
+export interface GoToFilterCommand { type: 'GO_TO_FILTER'; name: string }  // FILTERS map key
+export interface GoToItemCommand { type: 'GO_TO_ITEM'; which: 'first' | 'next' | 'unprocessed' }
 
-// Actions
+// Actions (operate on currentElement)
 export interface TypeCommand { type: 'TYPE'; text: string }
 export interface SubmitCommand { type: 'SUBMIT' }
 export interface ClickCommand { type: 'CLICK' }
-export interface ClickItemCommand { type: 'CLICK_ITEM' }
+export interface ClickIfExistsCommand { 
+  type: 'CLICK_IF_EXISTS'; 
+  name: string;  // Binding name: 'nextPageButton', 'loadMoreButton', or ELEMENTS key
+}
 export interface SelectCommand { type: 'SELECT'; option: string }
 export interface ClearCommand { type: 'CLEAR' }
-export interface CheckCommand { type: 'CHECK' }
-export interface UncheckCommand { type: 'UNCHECK' }
+export interface SetCheckedCommand { type: 'SET_CHECKED'; checked: boolean }
 
 // Scrolling
-export interface ScrollDownCommand { type: 'SCROLL_DOWN' }
-export interface ScrollUpCommand { type: 'SCROLL_UP' }
-export interface ScrollForMoreCommand { type: 'SCROLL_FOR_MORE' }
-export interface ScrollToTopCommand { type: 'SCROLL_TO_TOP' }
-export interface ScrollToBottomCommand { type: 'SCROLL_TO_BOTTOM' }
+export type ScrollTarget = 'page' | 'list';
+export interface ScrollCommand { 
+  type: 'SCROLL'; 
+  target: ScrollTarget; 
+  direction: 'up' | 'down';
+}
+export interface ScrollIfNotEndCommand { 
+  type: 'SCROLL_IF_NOT_END'; 
+  target: ScrollTarget;
+}
 
 // Data
-export interface ExtractDetailsCommand { type: 'EXTRACT_DETAILS' }
+export interface ExtractDetailsCommand { 
+  type: 'EXTRACT_DETAILS';
+  /** CSS selectors to extract content from (optional - falls back to bindings.DETAILS_CONTENT) */
+  selectors?: string[];
+}
 export interface SaveCommand { type: 'SAVE'; as: string }
 export interface MarkDoneCommand { type: 'MARK_DONE' }
 
@@ -57,72 +62,76 @@ export interface ForEachItemInListCommand {
   body: Command[];
   skipProcessed?: boolean;
 }
-export interface WhenListExhaustedCommand { 
-  type: 'WHEN_LIST_EXHAUSTED'; 
-  body: Command[] 
-}
-export interface IfNewItemsCommand { 
-  type: 'IF_NEW_ITEMS'; 
-  then: Command[]; 
-  else?: Command[] 
+export interface IfCommand {
+  type: 'IF';
+  condition: Condition;
+  then: Command[];
+  else?: Command[];
 }
 export interface RepeatCommand { 
   type: 'REPEAT'; 
   body: Command[];
   until: UntilCondition;
 }
-export interface ContinueCommand { type: 'CONTINUE' }
+export interface CheckpointCountCommand { type: 'CHECKPOINT_COUNT' }
 export interface EndCommand { type: 'END' }
 
-// All commands
+// All commands (18 total, down from 26)
 export type Command =
-  // Navigation
+  // Navigation (2)
   | OpenPageCommand
   | GoBackCommand
-  | RefreshCommand
-  // Waiting
-  | WaitForPageCommand
-  | WaitForListCommand
-  | WaitForListUpdateCommand
-  | WaitForDetailsCommand
+  // Waiting (2)
+  | WaitForCommand
   | WaitCommand
-  // Going To
-  | GoToSearchBoxCommand
-  | GoToFilterCommand
+  // Focus (3)
   | GoToCommand
-  | GoToListCommand
+  | GoToFilterCommand
   | GoToItemCommand
-  | GoToDetailsCommand
-  // Actions
+  // Actions (6)
   | TypeCommand
   | SubmitCommand
   | ClickCommand
-  | ClickItemCommand
+  | ClickIfExistsCommand
   | SelectCommand
   | ClearCommand
-  | CheckCommand
-  | UncheckCommand
-  // Scrolling
-  | ScrollDownCommand
-  | ScrollUpCommand
-  | ScrollForMoreCommand
-  | ScrollToTopCommand
-  | ScrollToBottomCommand
-  // Data
+  | SetCheckedCommand
+  // Scrolling (2)
+  | ScrollCommand
+  | ScrollIfNotEndCommand
+  // Data (3)
   | ExtractDetailsCommand
   | SaveCommand
   | MarkDoneCommand
-  // Flow
+  // Flow (5)
   | ForEachItemInListCommand
-  | WhenListExhaustedCommand
-  | IfNewItemsCommand
+  | IfCommand
   | RepeatCommand
-  | ContinueCommand
+  | CheckpointCountCommand
   | EndCommand
   ;
 
 // ============================================================================
-// Conditions
+// Conditions (for IF command)
+// ============================================================================
+
+/**
+ * Conditions for the IF command.
+ * These check runtime state to determine branching.
+ */
+export type Condition =
+  | { type: 'LIST_END' }              // List container can't scroll further
+  | { type: 'PAGE_END' }              // Page/window can't scroll further
+  | { type: 'NEW_ITEMS' }             // Item count changed since last CHECKPOINT_COUNT
+  | { type: 'EXISTS'; name: string }  // Element exists (uses binding name)
+  | { type: 'VISIBLE'; name: string } // Element is visible in viewport
+  | { type: 'NOT'; condition: Condition }
+  | { type: 'AND'; conditions: Condition[] }
+  | { type: 'OR'; conditions: Condition[] }
+  ;
+
+// ============================================================================
+// Until Conditions (for REPEAT command)
 // ============================================================================
 
 export type UntilCondition =
@@ -160,40 +169,39 @@ export const cmd = {
   // Navigation
   openPage: (url: string): OpenPageCommand => ({ type: 'OPEN_PAGE', url }),
   goBack: (): GoBackCommand => ({ type: 'GO_BACK' }),
-  refresh: (): RefreshCommand => ({ type: 'REFRESH' }),
   
   // Waiting
-  waitForPage: (): WaitForPageCommand => ({ type: 'WAIT_FOR_PAGE' }),
-  waitForList: (): WaitForListCommand => ({ type: 'WAIT_FOR_LIST' }),
-  waitForListUpdate: (): WaitForListUpdateCommand => ({ type: 'WAIT_FOR_LIST_UPDATE' }),
-  waitForDetails: (): WaitForDetailsCommand => ({ type: 'WAIT_FOR_DETAILS' }),
+  waitFor: (target: WaitTarget): WaitForCommand => ({ type: 'WAIT_FOR', target }),
   wait: (seconds: number): WaitCommand => ({ type: 'WAIT', seconds }),
   
-  // Going To
-  goToSearchBox: (): GoToSearchBoxCommand => ({ type: 'GO_TO_SEARCH_BOX' }),
-  goToFilter: (name: string): GoToFilterCommand => ({ type: 'GO_TO_FILTER', name }),
+  // Focus
   goTo: (name: string): GoToCommand => ({ type: 'GO_TO', name }),
-  goToList: (): GoToListCommand => ({ type: 'GO_TO_LIST' }),
-  goToItem: (which: 'first' | 'next' | 'current' | 'unprocessed' = 'next'): GoToItemCommand => 
+  goToFilter: (name: string): GoToFilterCommand => ({ type: 'GO_TO_FILTER', name }),
+  goToItem: (which: 'first' | 'next' | 'unprocessed' = 'next'): GoToItemCommand => 
     ({ type: 'GO_TO_ITEM', which }),
-  goToDetails: (): GoToDetailsCommand => ({ type: 'GO_TO_DETAILS' }),
   
   // Actions
   type: (text: string): TypeCommand => ({ type: 'TYPE', text }),
   submit: (): SubmitCommand => ({ type: 'SUBMIT' }),
   click: (): ClickCommand => ({ type: 'CLICK' }),
-  clickItem: (): ClickItemCommand => ({ type: 'CLICK_ITEM' }),
+  clickIfExists: (name: string): ClickIfExistsCommand => ({ type: 'CLICK_IF_EXISTS', name }),
   select: (option: string): SelectCommand => ({ type: 'SELECT', option }),
   clear: (): ClearCommand => ({ type: 'CLEAR' }),
-  check: (): CheckCommand => ({ type: 'CHECK' }),
-  uncheck: (): UncheckCommand => ({ type: 'UNCHECK' }),
+  setChecked: (checked: boolean): SetCheckedCommand => ({ type: 'SET_CHECKED', checked }),
   
   // Scrolling
-  scrollDown: (): ScrollDownCommand => ({ type: 'SCROLL_DOWN' }),
-  scrollUp: (): ScrollUpCommand => ({ type: 'SCROLL_UP' }),
-  scrollForMore: (): ScrollForMoreCommand => ({ type: 'SCROLL_FOR_MORE' }),
-  scrollToTop: (): ScrollToTopCommand => ({ type: 'SCROLL_TO_TOP' }),
-  scrollToBottom: (): ScrollToBottomCommand => ({ type: 'SCROLL_TO_BOTTOM' }),
+  scroll: (target: ScrollTarget, direction: 'up' | 'down' = 'down'): ScrollCommand => 
+    ({ type: 'SCROLL', target, direction }),
+  scrollList: (direction: 'up' | 'down' = 'down'): ScrollCommand => 
+    ({ type: 'SCROLL', target: 'list', direction }),
+  scrollPage: (direction: 'up' | 'down' = 'down'): ScrollCommand => 
+    ({ type: 'SCROLL', target: 'page', direction }),
+  scrollIfNotEnd: (target: ScrollTarget): ScrollIfNotEndCommand => 
+    ({ type: 'SCROLL_IF_NOT_END', target }),
+  scrollListIfNotEnd: (): ScrollIfNotEndCommand => 
+    ({ type: 'SCROLL_IF_NOT_END', target: 'list' }),
+  scrollPageIfNotEnd: (): ScrollIfNotEndCommand => 
+    ({ type: 'SCROLL_IF_NOT_END', target: 'page' }),
   
   // Data
   extractDetails: (): ExtractDetailsCommand => ({ type: 'EXTRACT_DETAILS' }),
@@ -203,17 +211,15 @@ export const cmd = {
   // Flow
   forEachItemInList: (body: Command[], skipProcessed = true): ForEachItemInListCommand => 
     ({ type: 'FOR_EACH_ITEM_IN_LIST', body, skipProcessed }),
-  whenListExhausted: (body: Command[]): WhenListExhaustedCommand => 
-    ({ type: 'WHEN_LIST_EXHAUSTED', body }),
-  ifNewItems: (then: Command[], elseCmd?: Command[]): IfNewItemsCommand => 
-    ({ type: 'IF_NEW_ITEMS', then, else: elseCmd }),
+  if: (condition: Condition, then: Command[], elseCmd?: Command[]): IfCommand => 
+    ({ type: 'IF', condition, then, else: elseCmd }),
   repeat: (body: Command[], until: UntilCondition): RepeatCommand => 
     ({ type: 'REPEAT', body, until }),
-  continue: (): ContinueCommand => ({ type: 'CONTINUE' }),
+  checkpointCount: (): CheckpointCountCommand => ({ type: 'CHECKPOINT_COUNT' }),
   end: (): EndCommand => ({ type: 'END' }),
 };
 
-// Until condition builders
+// Until condition builders (for REPEAT)
 export const until = {
   collected: (count: number): UntilCondition => ({ type: 'COLLECTED', count }),
   noMoreItems: (): UntilCondition => ({ type: 'NO_MORE_ITEMS' }),
@@ -222,16 +228,28 @@ export const until = {
   and: (...conditions: UntilCondition[]): UntilCondition => ({ type: 'AND', conditions }),
 };
 
+// Condition builders (for IF)
+export const when = {
+  listEnd: (): Condition => ({ type: 'LIST_END' }),
+  pageEnd: (): Condition => ({ type: 'PAGE_END' }),
+  newItems: (): Condition => ({ type: 'NEW_ITEMS' }),
+  exists: (name: string): Condition => ({ type: 'EXISTS', name }),
+  visible: (name: string): Condition => ({ type: 'VISIBLE', name }),
+  not: (condition: Condition): Condition => ({ type: 'NOT', condition }),
+  and: (...conditions: Condition[]): Condition => ({ type: 'AND', conditions }),
+  or: (...conditions: Condition[]): Condition => ({ type: 'OR', conditions }),
+};
+
 // ============================================================================
 // Pre-built Recipe Templates
 // ============================================================================
 
 export const recipeTemplates = {
   /**
-   * Basic job listing extraction:
-   * - Go to page
-   * - For each item: click, wait for details, extract, save
-   * - Scroll for more
+   * Job listing extraction with hybrid scroll + pagination:
+   * - Process visible items
+   * - Scroll to load more
+   * - If scroll doesn't load more, try pagination
    * - Repeat until collected enough or no more items
    */
   jobListingExtraction: (url: string, maxItems: number = 20): Recipe => ({
@@ -239,20 +257,29 @@ export const recipeTemplates = {
     name: 'Job Listing Extraction',
     commands: [
       cmd.openPage(url),
-      cmd.waitForPage(),
-      cmd.waitForList(),
+      cmd.waitFor('page'),
+      cmd.waitFor('list'),
       
       cmd.repeat([
+        // Process current items
         cmd.forEachItemInList([
-          cmd.clickItem(),
-          cmd.waitForDetails(),
+          cmd.click(),  // Click current item (set by FOR_EACH)
+          cmd.waitFor('details'),
           cmd.extractDetails(),
           cmd.save('job'),
           cmd.markDone(),
         ]),
         
-        cmd.scrollForMore(),
-        cmd.waitForListUpdate(),
+        // Try to load more items
+        cmd.checkpointCount(),
+        cmd.scrollPage('down'),
+        cmd.wait(1),
+        
+        // If scroll didn't load more, try pagination
+        cmd.if(when.not(when.newItems()), [
+          cmd.clickIfExists('nextPageButton'),
+          cmd.waitFor('listUpdate'),
+        ]),
       ], until.or(
         until.collected(maxItems),
         until.noMoreItems()
@@ -264,34 +291,37 @@ export const recipeTemplates = {
   }),
 
   /**
-   * Job listing with search:
-   * - Go to page
-   * - Search for query
-   * - Then extract jobs
+   * Job listing with search
    */
   jobListingWithSearch: (url: string, query: string, maxItems: number = 20): Recipe => ({
     id: 'job_listing_with_search',
     name: 'Job Listing with Search',
     commands: [
       cmd.openPage(url),
-      cmd.waitForPage(),
+      cmd.waitFor('page'),
       
-      cmd.goToSearchBox(),
+      cmd.goTo('searchBox'),
       cmd.type(query),
       cmd.submit(),
-      cmd.waitForList(),
+      cmd.waitFor('list'),
       
       cmd.repeat([
         cmd.forEachItemInList([
-          cmd.clickItem(),
-          cmd.waitForDetails(),
+          cmd.click(),
+          cmd.waitFor('details'),
           cmd.extractDetails(),
           cmd.save('job'),
           cmd.markDone(),
         ]),
         
-        cmd.scrollForMore(),
-        cmd.waitForListUpdate(),
+        cmd.checkpointCount(),
+        cmd.scrollPage('down'),
+        cmd.wait(1),
+        
+        cmd.if(when.not(when.newItems()), [
+          cmd.clickIfExists('nextPageButton'),
+          cmd.waitFor('listUpdate'),
+        ]),
       ], until.or(
         until.collected(maxItems),
         until.noMoreItems()
@@ -302,4 +332,3 @@ export const recipeTemplates = {
     config: { maxItems },
   }),
 };
-
