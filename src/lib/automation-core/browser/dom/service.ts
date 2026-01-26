@@ -33,6 +33,45 @@ export async function getClickableElements(
 }
 
 /**
+ * Get the raw DOM tree output directly from buildDomTree.js
+ * Returns the flat map that can be serialized to JSON for the LLM.
+ */
+export async function getRawDomTree(
+  tabId: number,
+  url: string,
+): Promise<BuildDomTreeResult> {
+  if (isNewTabPage(url) || url.startsWith('chrome://')) {
+    return { rootId: '0', map: {} };
+  }
+
+  await injectBuildDomTreeScripts(tabId);
+
+  const mainFrameResult = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (args: BuildDomTreeArgs) => {
+      return window.buildDomTree(args);
+    },
+    args: [
+      {
+        showHighlightElements: true,
+        focusHighlightIndex: -1,
+        viewportExpansion: 0,
+        startId: 0,
+        startHighlightIndex: 0,
+        debugMode: false,
+      },
+    ],
+  });
+
+  const result = mainFrameResult[0]?.result as unknown as BuildDomTreeResult;
+  if (!result || !result.map || !result.rootId) {
+    throw new Error('Failed to build DOM tree: No result returned');
+  }
+
+  return result;
+}
+
+/**
  * Build the DOM tree for a tab
  */
 async function buildDomTree(

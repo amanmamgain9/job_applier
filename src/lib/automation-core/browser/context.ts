@@ -155,7 +155,8 @@ export class BrowserContext {
     } = {},
   ): Promise<void> {
     // waitForActivation defaults to false - DevTools Protocol doesn't require tab to be visually active
-    const { waitForUpdate = true, waitForActivation = false, timeoutMs = 5000 } = options;
+    // Increased default timeout to 30s for slow-loading pages like LinkedIn
+    const { waitForUpdate = true, waitForActivation = false, timeoutMs = 30000 } = options;
 
     logger.info(`[waitForTabEvents] tabId=${tabId}, waitForUpdate=${waitForUpdate}, waitForActivation=${waitForActivation}, timeout=${timeoutMs}ms`);
 
@@ -164,12 +165,14 @@ export class BrowserContext {
     if (waitForUpdate) {
       const updatePromise = new Promise<void>((resolve, reject) => {
         let hasUrl = false;
-        let hasTitle = false;
         let isComplete = false;
+        // Note: We no longer require hasTitle - some pages don't emit title events reliably
+        // and checking tab.title in initial state is sufficient
 
         const checkAndResolve = (source: string) => {
-          logger.info(`[waitForTabEvents] ${source}: hasUrl=${hasUrl}, hasTitle=${hasTitle}, isComplete=${isComplete}`);
-          if (hasUrl && hasTitle && isComplete) {
+          logger.info(`[waitForTabEvents] ${source}: hasUrl=${hasUrl}, isComplete=${isComplete}`);
+          // Only require URL and complete status, not title (title can come later)
+          if (hasUrl && isComplete) {
             chrome.tabs.onUpdated.removeListener(onUpdatedHandler);
             logger.info(`[waitForTabEvents] Update complete for tab ${tabId}`);
             resolve();
@@ -181,7 +184,6 @@ export class BrowserContext {
 
           logger.info(`[waitForTabEvents] onUpdated event:`, changeInfo);
           if (changeInfo.url !== undefined) hasUrl = true;
-          if (changeInfo.title !== undefined) hasTitle = true;
           if (changeInfo.status === 'complete') isComplete = true;
 
           checkAndResolve('onUpdated');
@@ -190,8 +192,7 @@ export class BrowserContext {
 
         chrome.tabs.get(tabId).then(tab => {
           logger.info(`[waitForTabEvents] Initial tab state: url=${tab.url}, title=${tab.title}, status=${tab.status}`);
-          if (tab.url !== undefined) hasUrl = true;
-          if (tab.title !== undefined) hasTitle = true;
+          if (tab.url !== undefined && tab.url !== '') hasUrl = true;
           if (tab.status === 'complete') isComplete = true;
 
           checkAndResolve('initial');

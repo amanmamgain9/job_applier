@@ -52,7 +52,8 @@ export function createMessageHandler<T extends MessageType>(
     sendResponse: (response?: unknown) => void
   ): boolean => {
     if (message.type === type) {
-      const result = handler(message.payload as Extract<ExtensionMessage, { type: T }>['payload'], sender);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const result = handler(message.payload as any, sender);
       if (result instanceof Promise) {
         result.then(sendResponse);
         return true; // Keep the message channel open for async response

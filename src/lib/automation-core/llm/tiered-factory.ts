@@ -45,6 +45,7 @@ const COST_MAP: Record<string, CostInfo> = {
   'gemini-1.5-flash-002': { inputCostPer1M: 0.075, outputCostPer1M: 0.30 },
   'gemini-1.5-pro': { inputCostPer1M: 1.25, outputCostPer1M: 5.00 },
   'gemini-2.0-flash': { inputCostPer1M: 0.10, outputCostPer1M: 0.40 },
+  'gemini-3-flash-preview': { inputCostPer1M: 0.15, outputCostPer1M: 0.60 },  // Estimated pricing
   
   // Anthropic models
   'claude-sonnet-4-20250514': { inputCostPer1M: 3.00, outputCostPer1M: 15.00 },
@@ -65,8 +66,8 @@ export function createDualModelConfig(geminiApiKey: string): DualModelConfig {
     navigator: {
       provider: 'gemini',
       apiKey: geminiApiKey,
-      // Use gemini-2.0-flash for navigation (good balance of speed and capability)
-      model: 'gemini-2.0-flash',
+      // Use gemini-3-flash-preview for navigation (latest, best reasoning)
+      model: 'gemini-3-flash-preview',
       temperature: 0.1,
     },
     extractor: {

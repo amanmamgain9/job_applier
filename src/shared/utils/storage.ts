@@ -1,5 +1,5 @@
 import type { Job } from '../types/job';
-import type { Settings, UserProfile, DEFAULT_SETTINGS, DEFAULT_PROFILE } from '../types/storage';
+import type { Settings, UserProfile } from '../types/storage';
 
 // Chrome storage wrapper with type safety
 

@@ -1,4 +1,5 @@
 import type { Job, JobStatus } from './job';
+import type { SessionReport } from '@/lib/automation-core';
 
 export type MessageType =
   | 'CAPTURE_JOB'
@@ -17,6 +18,7 @@ export type MessageType =
   | 'DISCOVERY_STATE'
   | 'DISCOVERY_JOB_FOUND'
   | 'GET_SESSION_REPORT'
+  | 'REPORT_UPDATE'
   // Dev tools
   | 'TEST_STRATEGY_PLANNER';
 
@@ -55,6 +57,7 @@ export interface DiscoveryStatePayload {
 
 export interface StartDiscoveryPayload {
   url: string;
+  task?: string;
   maxJobs?: number;
 }
 
@@ -63,6 +66,7 @@ export type StopDiscoveryMessage = BaseMessage<'STOP_DISCOVERY', undefined>;
 export type DiscoveryStateMessage = BaseMessage<'DISCOVERY_STATE', DiscoveryStatePayload>;
 export type DiscoveryJobFoundMessage = BaseMessage<'DISCOVERY_JOB_FOUND', Job>;
 export type GetSessionReportMessage = BaseMessage<'GET_SESSION_REPORT', undefined>;
+export type ReportUpdateMessage = BaseMessage<'REPORT_UPDATE', SessionReport>;
 
 // Dev tools
 export interface TestStrategyPlannerPayload {
@@ -84,6 +88,7 @@ export type ExtensionMessage =
   | DiscoveryStateMessage
   | DiscoveryJobFoundMessage
   | GetSessionReportMessage
+  | ReportUpdateMessage
   | TestStrategyPlannerMessage;
 
 export function createMessage<T extends MessageType, P>(

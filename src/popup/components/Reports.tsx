@@ -305,10 +305,41 @@ export function Reports() {
   const [reports, setReports] = useState<SessionReport[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [selectedReport, setSelectedReport] = useState<SessionReport | null>(null);
+  // Unused for now but tracked for potential live indicator
+  const [_liveReport, setLiveReport] = useState<SessionReport | null>(null);
 
   useEffect(() => {
     loadReports();
-  }, []);
+    
+    // Listen for real-time report updates
+    const handleMessage = (message: { type: string; payload: SessionReport }) => {
+      if (message.type === 'REPORT_UPDATE') {
+        const report = message.payload;
+        setLiveReport(report);
+        
+        // If we're viewing this report, update it in real-time
+        if (selectedReport?.id === report.id) {
+          setSelectedReport(report);
+        }
+        
+        // Update in reports list
+        setReports(prev => {
+          const exists = prev.findIndex(r => r.id === report.id);
+          if (exists >= 0) {
+            const updated = [...prev];
+            updated[exists] = report;
+            return updated;
+          } else {
+            // Add new report at the beginning
+            return [report, ...prev];
+          }
+        });
+      }
+    };
+    
+    chrome.runtime.onMessage.addListener(handleMessage);
+    return () => chrome.runtime.onMessage.removeListener(handleMessage);
+  }, [selectedReport?.id]);
 
   const loadReports = async () => {
     try {
@@ -319,6 +350,9 @@ export function Reports() {
         // Sort by most recent first
         const sorted = [...response.allReports].sort((a, b) => b.startedAt - a.startedAt);
         setReports(sorted);
+      } else if (response?.report) {
+        // Single report returned (current)
+        setReports([response.report]);
       }
     } catch (err) {
       console.error('Failed to load reports:', err);

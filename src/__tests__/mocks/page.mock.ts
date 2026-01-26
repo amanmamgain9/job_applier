@@ -3,7 +3,8 @@
  */
 
 import { vi, type Mock } from 'vitest';
-import type { Page } from '@/lib/automation-core/browser/page';
+import type { Page as _Page } from '@/lib/automation-core/browser/page';
+// Page type imported for reference, actual mock implements partial interface
 import { DOMElementNode } from '@/lib/automation-core/browser/dom/views';
 
 export interface MockPageOptions {

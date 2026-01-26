@@ -3,7 +3,7 @@
  */
 
 import { SELECTORS } from './selectors';
-import type { Job, LocationType, JobType, Salary } from '@shared/types/job';
+import type { LocationType, JobType, Salary } from '@shared/types/job';
 
 interface ScrapedJob {
   linkedinJobId: string;

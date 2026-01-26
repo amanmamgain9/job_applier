@@ -5,65 +5,18 @@
  * Handles:
  * - Chrome extension messaging (runtime.onMessage)
  * - Extension lifecycle events (onInstalled, onClicked, tabs.onUpdated)
- * - Broadcasting messages to popup/UI
- * - Badge updates
  */
 
 import { addJob, updateJob, getJobs, getSettings } from '@shared/utils/storage';
-import { createMessage, type ExtensionMessage } from '@shared/types/messages';
+import type { ExtensionMessage } from '@shared/types/messages';
 import { logger } from '@shared/utils';
-import {
-  startDiscovery,
-  stopDiscovery,
-  getDiscoveryState,
-  getSessionReports,
-  getLastSessionReport,
-  onStateChange,
-  onJobFound,
-  hasLLMConfig,
-} from './discovery';
-import { testStrategyPlannerOnActiveTab } from './planner-test';
+import { startDiscovery, stopDiscovery, getDiscoveryState, getCurrentReport } from './discovery';
 
 // ============================================================================
 // Initialization
 // ============================================================================
 
 logger.info('Background service worker started');
-
-// Wire up discovery state changes to broadcast messages
-onStateChange((state) => {
-  broadcastMessage(createMessage('DISCOVERY_STATE', {
-    status: state.status,
-    jobsFound: state.jobsFound,
-    currentStep: state.currentStep,
-    maxSteps: state.maxSteps,
-    error: state.error,
-  }));
-});
-
-// Wire up job found events to storage and notifications
-onJobFound(async (job) => {
-  await addJob(job);
-  broadcastMessage(createMessage('DISCOVERY_JOB_FOUND', job));
-  
-  const settings = await getSettings();
-  if (settings.notifications) {
-    chrome.action.setBadgeText({ text: '!' });
-    chrome.action.setBadgeBackgroundColor({ color: '#22c55e' });
-  }
-});
-
-// ============================================================================
-// Message Broadcasting
-// ============================================================================
-
-async function broadcastMessage(message: ExtensionMessage): Promise<void> {
-  try {
-    await chrome.runtime.sendMessage(message).catch(() => {});
-  } catch {
-    // Ignore send errors (no receivers)
-  }
-}
 
 // ============================================================================
 // Message Handling
@@ -121,26 +74,19 @@ async function handleMessage(
     
     // ---- Discovery ----
     case 'START_DISCOVERY': {
-      if (!hasLLMConfig()) {
-        return { 
-          success: false, 
-          error: 'LLM not configured. Set VITE_GEMINI_API_KEY in .env file.' 
-        };
-      }
-      
-      const { maxJobs = 20, url } = message.payload;
+      const { url, task = 'Explore this page to locate jobs and find how to access their apply links' } = message.payload;
       
       if (!url) {
         return { success: false, error: 'URL is required for discovery' };
       }
       
-      // Use the new agent flow architecture
-      startDiscovery({ maxJobs, url, useAgentFlow: true })
+      // Run discovery
+      startDiscovery({ url, task })
         .then((result) => {
           logger.info('Discovery completed', { 
             success: result.success, 
-            jobsFound: result.jobs.length,
-            stoppedReason: result.stoppedReason 
+            pagesExplored: result.exploration?.pages?.size ?? 0,
+            navigationPath: result.exploration?.navigationPath,
           });
         })
         .catch((err) => {
@@ -151,7 +97,7 @@ async function handleMessage(
     }
     
     case 'STOP_DISCOVERY': {
-      await stopDiscovery();
+      stopDiscovery();
       return { success: true };
     }
     
@@ -160,30 +106,8 @@ async function handleMessage(
     }
     
     case 'GET_SESSION_REPORT': {
-      const allReports = await getSessionReports();
-      const lastReport = await getLastSessionReport();
-      return { 
-        lastReport,
-        allReports,
-        count: allReports.length,
-      };
-    }
-    
-    // ---- Dev Tools ----
-    case 'TEST_STRATEGY_PLANNER': {
-      const { task } = message.payload;
-      logger.info('Testing StrategyPlanner on active tab', { task });
-      
-      try {
-        const result = await testStrategyPlannerOnActiveTab(task);
-        return result;
-      } catch (err) {
-        logger.error('StrategyPlanner test failed', { error: err });
-        return {
-          success: false,
-          error: err instanceof Error ? err.message : String(err),
-        };
-      }
+      const report = getCurrentReport();
+      return { report };
     }
     
     default:
@@ -223,4 +147,3 @@ chrome.runtime.onInstalled.addListener((details) => {
 });
 
 export {};
-

@@ -19,6 +19,7 @@ import {
   getClickableElements as _getClickableElements,
   removeHighlights as _removeHighlights,
   getScrollInfo as _getScrollInfo,
+  getRawDomTree as _getRawDomTree,
 } from './dom/service';
 import { DOMElementNode, type DOMState } from './dom/views';
 import { type BrowserContextConfig, DEFAULT_BROWSER_CONTEXT_CONFIG, type PageState, URLNotAllowedError } from './types';
@@ -196,6 +197,19 @@ export class Page {
     const updatedState = await this._updateState(useVision);
     this._cachedState = updatedState;
     return updatedState;
+  }
+
+  /**
+   * Get the raw DOM tree output directly from buildDomTree.js
+   * Returns the flat map as JSON string for the LLM.
+   */
+  async getRawDom(): Promise<string> {
+    if (!this._validWebPage) {
+      return '{}';
+    }
+    await this.waitForPageAndFramesLoad();
+    const rawResult = await _getRawDomTree(this._tabId, this._state.url);
+    return JSON.stringify(rawResult.map, null, 2);
   }
 
   async _updateState(useVision = false, focusElement = -1): Promise<PageState> {
@@ -1005,6 +1019,44 @@ export class Page {
       logger.warning(`Failed to click selector "${selector}":`, error);
       return false;
     }
+  }
+
+  /**
+   * Type text into an element by CSS selector
+   * @param selector CSS selector for the input element
+   * @param text Text to type
+   * @returns true if typing was successful
+   */
+  async typeSelector(selector: string, text: string): Promise<boolean> {
+    if (!this._puppeteerPage) {
+      logger.warning('Puppeteer not attached, cannot type');
+      return false;
+    }
+
+    try {
+      await this._puppeteerPage.click(selector);
+      await this._puppeteerPage.type(selector, text);
+      return true;
+    } catch (error) {
+      logger.warning(`Failed to type into "${selector}":`, error);
+      return false;
+    }
+  }
+
+  /**
+   * Scroll the main page by pixels
+   * @param x Horizontal scroll amount
+   * @param y Vertical scroll amount
+   */
+  async scrollBy(x: number, y: number): Promise<void> {
+    if (!this._puppeteerPage) {
+      logger.warning('Puppeteer not attached, cannot scroll');
+      return;
+    }
+
+    await this._puppeteerPage.evaluate((scrollX, scrollY) => {
+      window.scrollBy(scrollX, scrollY);
+    }, x, y);
   }
 
   /**
