@@ -24,6 +24,19 @@ Compare the BEFORE and AFTER DOM states and determine what specifically changed:
 - Selection changed (e.g., different item highlighted)
 - Nothing visible changed
 
+ELEMENT TYPE CLASSIFICATION:
+Look at BOTH the element that was clicked AND what content appeared:
+- If a modal/dialog with filter options appeared → element_type: "filter button"
+- If a modal/dialog with application form appeared → element_type: "apply button"  
+- If job details panel updated → element_type: "job listing"
+- If clicking dismisses/closes something → element_type: "close button"
+- If clicking saves/bookmarks → element_type: "save button"
+- If clicking navigates to new page → element_type: "navigation link"
+- If dropdown with options appeared → element_type: "dropdown button"
+- If pagination changed → element_type: "pagination control"
+
+The element_type should describe what the user interacted with, based on its EFFECT.
+
 Be specific and actionable. Your analysis helps decide what to do next.`;
 
 export interface ChangeAnalyzerOptions {
@@ -72,7 +85,7 @@ const analyzeChangeTool = {
         },
         element_type: {
           type: 'string',
-          description: 'Short label for what element was interacted with (e.g., "job listing", "apply button", "filter dropdown", "close button", "save button", "form field", "navigation link")',
+          description: 'Classify the clicked element based on its EFFECT. Look at what appeared/changed: filter options appeared → "filter button", application modal appeared → "apply button", job details updated → "job listing", something closed/dismissed → "close button", navigation occurred → "navigation link", dropdown appeared → "dropdown button", content saved → "save button"',
         },
         change_type: {
           type: 'string',

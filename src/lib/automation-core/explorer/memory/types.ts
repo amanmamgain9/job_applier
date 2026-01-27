@@ -46,11 +46,22 @@ export interface ClassifierResult {
   viaAction?: string;
 }
 
+export interface KeyElements {
+  filter_button?: string;
+  apply_button?: string;
+  job_listings?: string[];
+  search_input?: string;
+  pagination?: string;
+  close_button?: string;
+  [key: string]: string | string[] | undefined;
+}
+
 export interface ExplorationResult {
   success: boolean;
   pages: Map<string, PageNode>;
   navigationPath: string[];
   finalUnderstanding: string;
+  keyElements?: KeyElements;
   error?: string;
 }
 

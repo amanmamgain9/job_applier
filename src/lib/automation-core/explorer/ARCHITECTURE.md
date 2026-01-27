@@ -9,6 +9,141 @@ The explorer is a **multi-agent system** where:
 
 ---
 
+## Development Phases
+
+The system is being built in two phases:
+
+### Phase 1: Page Understanding (Current Phase)
+**Goal:** Explore and understand any job search page structure.
+
+**Output:** A structured understanding including:
+- Page type classification
+- Key UI element behaviors (what happens when you click)
+- Important selectors for key elements (filter button, apply button, job listings)
+- Navigation patterns
+
+### Phase 2: Job Collection (Upcoming)
+**Goal:** Use Phase 1 understanding to systematically collect job data.
+
+**Input:** Phase 1 output (page understanding with key selectors)
+**Output:** List of jobs with apply links
+
+---
+
+## Current Progress (Phase 1)
+
+### ✅ Completed
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Multi-agent orchestration | ✅ Done | Orchestrator manages Explorer, ChangeAnalyzer |
+| Explorer Agent | ✅ Done | click, scroll, type_text, observe, done tools |
+| ChangeAnalyzer Agent | ✅ Done | Classifies DOM changes, provides elementType |
+| Memory Store | ✅ Done | Pattern consolidation, page graph |
+| DOM Serialization | ✅ Done | Clickable elements with selectors |
+| Loop Detection | ✅ Done | Pattern-based + circuit breakers |
+| Report Streaming | ✅ Done | Real-time logging to UI |
+
+### ⚠️ Issues Identified (Fixed)
+
+| Issue | Impact | Status |
+|-------|--------|--------|
+| Filter button classified as "unknown element" | Phase 2 won't know how to open filters | ✅ **Fixed** |
+| Key selectors not in final output | Phase 2 lacks concrete starting points | ✅ **Fixed** |
+| Shallow filter exploration | Phase 2 won't know filter options | ⚠️ **Partial** (Optional FilterAnalyzer) |
+
+### ✅ Fixes Implemented
+
+#### 1. ChangeAnalyzer Element Classification (Fixed)
+
+**Before:**
+```
+click #ember150 → "Opened modal" → elementType: "unknown element"
+```
+
+**After:**
+ChangeAnalyzer now classifies elements based on the EFFECT of the action:
+- If filter modal opens → `elementType: "filter button"`
+- If application modal opens → `elementType: "apply button"`
+- If job details update → `elementType: "job listing"`
+- If something closes → `elementType: "close button"`
+
+**Implementation:** Updated `change-analyzer.ts` prompt with explicit classification guidance.
+
+#### 2. Key Selectors in Output (Fixed)
+
+**New Output Format:**
+```json
+{
+  "understanding": "...",
+  "keyFindings": ["..."],
+  "keyElements": {
+    "filter_button": "#ember150",
+    "apply_button": "#jobs-apply-button-id",
+    "job_listings": ["#ember224", "#ember214"],
+    "search_input": "#jobs-search-box-keyword-id-ember100"
+  }
+}
+```
+
+**Implementation:**
+- Added `key_elements` to `done()` tool parameters
+- Added `KeyElements` interface to types
+- Added `getDiscoveredSelectors()` to MemoryStore
+- Orchestrator merges LLM-provided and memory-discovered selectors
+
+#### 3. FilterAnalyzer Agent (Optional - Future Enhancement)
+
+**Purpose:** Deep-dive into filter modals when discovered.
+
+**Flow:**
+```
+Explorer clicks filter button
+  → Modal opens
+  → Orchestrator detects "filter modal" via ChangeAnalyzer
+  → Handoff to FilterAnalyzer
+  → FilterAnalyzer maps all filter options
+  → Returns to Explorer
+```
+
+This remains a nice-to-have for deeper filter understanding.
+
+---
+
+## Phase 1 → Phase 2 Handoff Contract
+
+Phase 2 expects this output from Phase 1:
+
+```typescript
+interface Phase1Output {
+  pageType: string;              // "job_search", "job_board", etc.
+  
+  keyElements: {
+    filterButton?: string;       // Selector to open filters
+    applyButton?: string;        // Selector for apply action
+    jobListings: string[];       // Selectors for job items
+    searchInput?: string;        // Search box selector
+    pagination?: string;         // Next page selector
+  };
+  
+  behaviors: {
+    [elementType: string]: {
+      action: string;            // "click", "type"
+      effect: string;            // "opens modal", "updates panel"
+      confirmed: boolean;        // Observed 2+ times
+    };
+  };
+  
+  filterOptions?: {
+    [filterName: string]: string[];  // e.g., "experience": ["Entry", "Mid", "Senior"]
+  };
+  
+  understanding: string;         // Human-readable summary
+}
+```
+
+---
+
 ## LLM-First Design Principles
 
 1. **Tool calls are the interface** - Agents express intent through tools, code executes
@@ -697,15 +832,127 @@ src/lib/automation-core/explorer/
 ├── index.ts                 # Exports
 ├── orchestrator.ts          # Main loop
 ├── agents/
-│   ├── classifier.ts        # Page classifier LLM
+│   ├── change-analyzer.ts   # DOM change classifier LLM
 │   ├── explorer.ts          # Action decider LLM
-│   └── summarizer.ts        # Observation compressor LLM
+│   └── summarizer.ts        # Observation compressor LLM (future)
 ├── memory/
 │   ├── store.ts             # MemoryStore class
-│   ├── types.ts             # PageNode, Edge interfaces
-│   └── serializer.ts        # Convert memory to LLM-readable format
-├── context/
-│   └── builder.ts           # Build prompts for each agent
+│   └── types.ts             # PageNode, Edge, BehaviorPattern interfaces
 └── types.ts                 # Shared types
+```
+
+---
+
+## Phase 2: Job Collection (Design Preview)
+
+### Overview
+
+Phase 2 takes the output from Phase 1 and systematically collects job data.
+
+```
+┌─────────────────────┐     Phase 1 Output     ┌─────────────────────┐
+│   PHASE 1           │ ─────────────────────► │   PHASE 2           │
+│   (Exploration)     │   keyElements,         │   (Collection)      │
+│                     │   behaviors,           │                     │
+│                     │   understanding        │                     │
+└─────────────────────┘                        └─────────────────────┘
+                                                        │
+                                                        ▼
+                                               ┌─────────────────────┐
+                                               │   JOB DATA          │
+                                               │   - title           │
+                                               │   - company         │
+                                               │   - apply_link      │
+                                               │   - location        │
+                                               └─────────────────────┘
+```
+
+### Phase 2 Agents
+
+#### 1. Collector Agent
+
+**Purpose:** Iterate through job listings and extract data.
+
+**Tools:**
+| Tool | Args | Returns |
+|------|------|---------|
+| `select_job` | `selector` | `{ job_details_dom }` |
+| `extract_data` | — | `{ title, company, location, apply_url }` |
+| `next_page` | — | `{ success, has_more }` |
+| `apply_filters` | `filter_settings` | `{ success, job_count }` |
+| `finish` | `jobs[]` | — |
+
+**Flow:**
+```
+1. Apply filters if needed (using Phase 1's filterButton selector)
+2. For each job listing (using Phase 1's jobListings selectors):
+   a. Click to select
+   b. Extract data from details panel
+   c. Find apply link
+3. Check pagination
+4. Repeat until done
+```
+
+#### 2. Extractor Agent
+
+**Purpose:** Parse job details from DOM into structured data.
+
+**Input:** Raw DOM of job details panel
+**Output:** Structured job object
+
+```typescript
+interface JobData {
+  title: string;
+  company: string;
+  location: string;
+  salary?: string;
+  applyUrl: string;
+  applyType: 'easy_apply' | 'external' | 'unknown';
+  postedDate?: string;
+  description?: string;
+}
+```
+
+### Phase 2 Memory
+
+Separate from Phase 1 memory. Tracks:
+- Jobs collected so far
+- Pages visited (for deduplication)
+- Filter state applied
+- Errors/retries
+
+### Phase 2 Circuit Breakers
+
+- Max jobs per session (e.g., 100)
+- Max pages (e.g., 10)
+- Consecutive errors threshold
+- Duplicate detection
+
+---
+
+## Development Roadmap
+
+```
+Phase 1 (COMPLETE ✅)
+├── [x] Multi-agent orchestration
+├── [x] Explorer Agent
+├── [x] ChangeAnalyzer Agent
+├── [x] Memory Store with patterns
+├── [x] Loop detection
+├── [x] Better element classification
+├── [x] Key selector tracking in output
+└── [ ] (Optional) FilterAnalyzer Agent for deep filter mapping
+
+Phase 2 (READY TO START ← YOU ARE HERE)
+├── [ ] Collector Agent
+├── [ ] Extractor Agent
+├── [ ] Pagination handling
+├── [ ] Filter application
+└── [ ] Job deduplication
+
+Phase 3 (Future)
+├── [ ] Apply automation
+├── [ ] Resume/cover letter customization
+└── [ ] Application tracking
 ```
 

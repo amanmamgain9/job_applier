@@ -2,36 +2,32 @@
  * MemoryStore - Graph-based memory for page exploration
  * 
  * Stores page nodes and edges, tracks navigation path,
- * consolidates behavioral patterns, and serializes for LLM context.
+ * and holds behavioral patterns (consolidated by ConsolidatorAgent).
+ * 
+ * Pattern consolidation is now done by the LLM (ConsolidatorAgent),
+ * not by brittle code-based rules.
  */
 
 import { PageNode, Edge, ClassifierResult, BehaviorPattern } from './types';
-
-/**
- * Normalize an effect description for comparison.
- * Strip variable parts (job titles, company names) to find the pattern.
- * E.g., "job details panel updated to show 'SDE III'" → "job details panel updated"
- */
-function normalizeEffect(effect: string): string {
-  return effect
-    // Remove quoted content (job titles, company names)
-    .replace(/"[^"]+"/g, '')
-    .replace(/'[^']+'/g, '')
-    // Remove specific job/company mentions
-    .replace(/for\s+\S+/g, '')
-    .replace(/at\s+\S+/g, '')
-    .replace(/to\s+show\s+\S+/g, '')
-    // Clean up whitespace
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase();
-}
 
 export class MemoryStore {
   private pages: Map<string, PageNode> = new Map();
   private currentPageId: string | null = null;
   private previousPageId: string | null = null;
   private navigationPath: string[] = [];
+  
+  // Track when consolidation last ran
+  private lastConsolidationAt: number = 0;
+  
+  // Pending observations not yet consolidated
+  private pendingObservations: Array<{
+    action: string;
+    selector?: string;
+    elementType: string;
+    effect: string;
+    changeType: string;
+    timestamp: number;
+  }> = [];
 
   /**
    * Update memory from classifier result
@@ -91,44 +87,13 @@ export class MemoryStore {
   }
 
   /**
-   * Check if two normalized effect descriptions are similar enough to be the same pattern.
+   * Add a raw observation (before consolidation).
+   * The ConsolidatorAgent will later process these into patterns.
    */
-  private effectsSimilar(effect1: string, effect2: string): boolean {
-    // Exact match
-    if (effect1 === effect2) return true;
-    
-    // One contains the other
-    if (effect1.includes(effect2) || effect2.includes(effect1)) return true;
-    
-    // Check for common key phrases that indicate same behavior
-    const keyPhrases = [
-      'details panel updated',
-      'details pane updated',
-      'job details',
-      'modal opened',
-      'modal closed',
-      'filter applied',
-      'content loaded',
-      'navigated',
-    ];
-    
-    for (const phrase of keyPhrases) {
-      if (effect1.includes(phrase) && effect2.includes(phrase)) {
-        return true;
-      }
-    }
-    
-    return false;
-  }
-
-  /**
-   * Add a pattern observation using LLM-classified element type.
-   * This is the primary method for recording behavioral patterns.
-   */
-  addPatternObservation(data: {
+  addRawObservation(data: {
     action: string;
     selector?: string;
-    elementType: string;  // LLM-classified
+    elementType: string;
     effect: string;
     changeType: string;
   }): void {
@@ -139,46 +104,110 @@ export class MemoryStore {
     
     // Build description for raw observations
     const rawDesc = data.selector 
-      ? `${data.action} "${data.selector}" → ${data.effect} [${data.changeType}]`
-      : `${data.action} → ${data.effect} [${data.changeType}]`;
+      ? `${data.action} "${data.selector}" (${data.elementType}) → ${data.effect} [${data.changeType}]`
+      : `${data.action} (${data.elementType}) → ${data.effect} [${data.changeType}]`;
     page.rawObservations.push(rawDesc);
     
-    // Find matching pattern by action + changeType + normalized effect
-    const normalizedEffect = normalizeEffect(data.effect);
+    // Add to pending observations for consolidation
+    this.pendingObservations.push({
+      ...data,
+      timestamp: Date.now(),
+    });
+  }
+
+  /**
+   * Replace patterns with consolidated patterns from ConsolidatorAgent.
+   */
+  updatePatternsFromConsolidation(patterns: BehaviorPattern[]): void {
+    if (!this.currentPageId) return;
     
-    const existingPattern = page.patterns.find(p => 
-      p.action === data.action &&
-      p.changeType === data.changeType &&
-      this.effectsSimilar(normalizeEffect(p.effect), normalizedEffect)
-    );
+    const page = this.pages.get(this.currentPageId);
+    if (!page) return;
     
-    if (existingPattern) {
-      existingPattern.count++;
-      existingPattern.confirmed = existingPattern.count >= 2;
-      
-      if (data.selector && existingPattern.selectors.length < 3 && 
-          !existingPattern.selectors.includes(data.selector)) {
-        existingPattern.selectors.push(data.selector);
+    // Merge with existing patterns, preserving firstSeen timestamps
+    const existingById = new Map(page.patterns.map(p => [p.id, p]));
+    
+    page.patterns = patterns.map(newPattern => {
+      const existing = existingById.get(newPattern.id);
+      if (existing) {
+        // Preserve firstSeen, update everything else
+        return {
+          ...newPattern,
+          firstSeen: existing.firstSeen,
+        };
       }
-    } else {
-      const newPattern: BehaviorPattern = {
-        id: `pattern_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-        action: data.action,
-        targetDescription: data.elementType,  // Directly use LLM classification
-        effect: data.effect,
-        changeType: data.changeType,
-        selectors: data.selector ? [data.selector] : [],
-        count: 1,
-        confirmed: false,
-        firstSeen: Date.now(),
-      };
-      page.patterns.push(newPattern);
+      return newPattern;
+    });
+    
+    // Clear pending observations after consolidation
+    this.pendingObservations = [];
+    this.lastConsolidationAt = Date.now();
+  }
+
+  /**
+   * Get data needed for consolidation.
+   */
+  getConsolidationInput(): {
+    rawObservations: string[];
+    existingPatterns: BehaviorPattern[];
+    pendingObservations: Array<{
+      action: string;
+      selector?: string;
+      elementType: string;
+      effect: string;
+      changeType: string;
+      timestamp: number;
+    }>;
+  } {
+    if (!this.currentPageId) {
+      return { rawObservations: [], existingPatterns: [], pendingObservations: [] };
     }
+    
+    const page = this.pages.get(this.currentPageId);
+    if (!page) {
+      return { rawObservations: [], existingPatterns: [], pendingObservations: [] };
+    }
+    
+    return {
+      rawObservations: page.rawObservations,
+      existingPatterns: page.patterns,
+      pendingObservations: this.pendingObservations,
+    };
+  }
+
+  /**
+   * Check if consolidation should run.
+   */
+  shouldConsolidate(): boolean {
+    // Run if we have pending observations
+    if (this.pendingObservations.length === 0) {
+      return false;
+    }
+    
+    // Run after every 3 observations
+    if (this.pendingObservations.length >= 3) {
+      return true;
+    }
+    
+    // Run if 30+ seconds since last consolidation
+    const timeSinceLastConsolidation = Date.now() - this.lastConsolidationAt;
+    if (timeSinceLastConsolidation > 30000) {
+      return true;
+    }
+    
+    return false;
+  }
+
+  /**
+   * Get count of pending observations (not yet consolidated).
+   */
+  getPendingObservationCount(): number {
+    return this.pendingObservations.length;
   }
 
   /**
    * Add simple string observation (for warnings, notes, etc.)
-   * Does NOT consolidate into patterns - use addPatternObservation for that.
+   * Does NOT go through consolidation.
    */
   enrichCurrentPage(observation: string): void {
     if (!this.currentPageId) return;
@@ -190,32 +219,37 @@ export class MemoryStore {
   }
   
   /**
-   * Check if a pattern is already confirmed (explored enough)
+   * Check if a pattern is already confirmed (explored enough).
+   * Uses element type matching, not selector matching.
    */
-  isPatternConfirmed(action: string, _selector?: string): boolean {
-    return this.getMatchingPatternByAction(action)?.confirmed ?? false;
+  isPatternConfirmed(action: string, elementType?: string): boolean {
+    const pattern = this.getMatchingPattern(action, elementType);
+    return pattern?.confirmed ?? false;
   }
   
   /**
-   * Get a confirmed pattern for this action type, if any.
+   * Get a confirmed pattern for this action + element type, if any.
    * Used to warn the LLM when they're repeating a known behavior.
    */
-  getMatchingPattern(action: string, _selector?: string): BehaviorPattern | null {
-    return this.getMatchingPatternByAction(action);
-  }
-  
-  /**
-   * Get any confirmed pattern for this action type on the current page.
-   */
-  private getMatchingPatternByAction(action: string): BehaviorPattern | null {
+  getMatchingPattern(action: string, elementType?: string): BehaviorPattern | null {
     if (!this.currentPageId) return null;
     const page = this.pages.get(this.currentPageId);
     if (!page) return null;
     
-    // Find any confirmed pattern for this action type
+    // Find confirmed pattern for this action type
     for (const pattern of page.patterns) {
       if (pattern.action === action && pattern.confirmed) {
-        return pattern;
+        // If elementType provided, match it
+        if (elementType) {
+          const patternType = pattern.targetDescription.toLowerCase();
+          const searchType = elementType.toLowerCase();
+          if (patternType.includes(searchType) || searchType.includes(patternType)) {
+            return pattern;
+          }
+        } else {
+          // No elementType filter - return first confirmed pattern for this action
+          return pattern;
+        }
       }
     }
     return null;
@@ -243,6 +277,82 @@ export class MemoryStore {
       const status = p.confirmed ? 'confirmed' : 'observed';
       return `${p.action} ${p.targetDescription} → ${p.effect} (${status}, ${p.count}x)`;
     });
+  }
+
+  /**
+   * Get discovered selectors organized by element type.
+   * Extracts selectors from confirmed patterns, matching them to standard categories.
+   */
+  getDiscoveredSelectors(): {
+    filter_button?: string;
+    apply_button?: string;
+    job_listings?: string[];
+    search_input?: string;
+    pagination?: string;
+    close_button?: string;
+    [key: string]: string | string[] | undefined;
+  } {
+    const result: {
+      filter_button?: string;
+      apply_button?: string;
+      job_listings?: string[];
+      search_input?: string;
+      pagination?: string;
+      close_button?: string;
+      [key: string]: string | string[] | undefined;
+    } = {};
+    
+    if (!this.currentPageId) return result;
+    const page = this.pages.get(this.currentPageId);
+    if (!page) return result;
+    
+    // Map element types to standard categories
+    const typeMapping: Record<string, string> = {
+      'filter button': 'filter_button',
+      'filter dropdown': 'filter_button',
+      'apply button': 'apply_button',
+      'job listing': 'job_listings',
+      'search input': 'search_input',
+      'pagination control': 'pagination',
+      'close button': 'close_button',
+      'dropdown button': 'filter_button',
+    };
+    
+    for (const pattern of page.patterns) {
+      if (pattern.selectors.length === 0) continue;
+      
+      const targetLower = pattern.targetDescription.toLowerCase();
+      let category: string | undefined;
+      
+      // Try exact mapping first
+      for (const [type, cat] of Object.entries(typeMapping)) {
+        if (targetLower.includes(type)) {
+          category = cat;
+          break;
+        }
+      }
+      
+      if (!category) continue;
+      
+      // For job_listings, collect multiple selectors
+      if (category === 'job_listings') {
+        if (!result.job_listings) {
+          result.job_listings = [];
+        }
+        for (const sel of pattern.selectors) {
+          if (!result.job_listings.includes(sel)) {
+            result.job_listings.push(sel);
+          }
+        }
+      } else {
+        // For single-selector categories, use first confirmed selector
+        if (!result[category]) {
+          result[category] = pattern.selectors[0];
+        }
+      }
+    }
+    
+    return result;
   }
 
   /**
@@ -376,4 +486,3 @@ export class MemoryStore {
     return result;
   }
 }
-

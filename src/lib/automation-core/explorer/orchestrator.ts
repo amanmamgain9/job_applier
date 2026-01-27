@@ -3,7 +3,8 @@
  * 
  * Main loop that coordinates agents:
  * - Explorer: Navigates and observes
- * - Classifier: Determines page identity on URL change
+ * - ChangeAnalyzer: Determines what changed after actions
+ * - Consolidator: Groups observations into patterns (LLM-based)
  * - Summarizer: Compresses observations
  * 
  * Handles tool execution, handoffs, and memory updates.
@@ -15,6 +16,7 @@ import { MemoryStore, ExplorationResult } from './memory';
 import { runExplorer, ExplorerAction } from './agents/explorer';
 import { runSummarizer } from './agents/summarizer';
 import { runChangeAnalyzer } from './agents/change-analyzer';
+import { runConsolidator, consolidatorOutputToPatterns } from './agents/consolidator';
 import { domTreeToString } from '../utils/dom-to-text';
 import { ReportService } from '../reporting';
 import { createLogger } from '../utils/logger';
@@ -91,7 +93,7 @@ export async function runOrchestrator(options: OrchestratorOptions): Promise<Exp
 
       // Get current state  
       const currentState = await page.getState();
-      const currentDom = domTreeToString(currentState.elementTree, { includeSelectors: true });
+      let currentDom = domTreeToString(currentState.elementTree, { includeSelectors: true });
 
       // Check for action loop - if last 3 actions are identical, force variety
       const lastActions = recentActions.slice(-3);
@@ -115,12 +117,47 @@ export async function runOrchestrator(options: OrchestratorOptions): Promise<Exp
         memory.enrichCurrentPage(`WARNING: You have scrolled 5 times in a row. Stop scrolling and try clicking on elements you can see, or dismiss any open dialogs.`);
       }
 
+      // Run Consolidator if needed (LLM-based pattern recognition)
+      if (memory.shouldConsolidate()) {
+        report?.startAction('Consolidating patterns');
+        const consolidationInput = memory.getConsolidationInput();
+        
+        try {
+          const consolidationResult = await runConsolidator({
+            llm,
+            input: {
+              rawObservations: consolidationInput.rawObservations,
+              existingPatterns: consolidationInput.existingPatterns,
+              truncatedDom: currentDom.slice(0, 3000),
+            },
+          });
+          
+          // Update memory with consolidated patterns
+          const newPatterns = consolidatorOutputToPatterns(consolidationResult);
+          memory.updatePatternsFromConsolidation(newPatterns);
+          
+          report?.log(`[Consolidation] ${newPatterns.length} patterns identified, ${newPatterns.filter(p => p.confirmed).length} confirmed`);
+          report?.endAction(true);
+        } catch (error) {
+          report?.log(`[Consolidation Error] ${error}`);
+          report?.endAction(false, String(error));
+        }
+      }
+
       // Run Explorer to decide next action
       const memorySummary = memory.getSummary();
       report?.log(`[Memory] Page: ${memory.getCurrentPageId()}, Observations: ${memory.getObservations(memory.getCurrentPageId() || '').length}`);
       report?.log(`[Memory Summary] ${memorySummary.slice(0, 500).replace(/\n/g, ' | ')}`);
-      report?.log(`[DOM Length] ${currentDom.length} chars`);
-      report?.log(`[DOM Preview] ${currentDom.slice(0, 2000).replace(/\n/g, ' | ')}`);
+      
+      // Safety check for undefined DOM
+      if (!currentDom) {
+        report?.log(`[ERROR] currentDom is undefined! Attempting to refresh...`);
+        const refreshedState = await page.getState();
+        currentDom = domTreeToString(refreshedState.elementTree, { includeSelectors: true });
+      }
+      
+      report?.log(`[DOM Length] ${currentDom?.length || 0} chars`);
+      report?.log(`[DOM Preview] ${(currentDom || '').slice(0, 2000).replace(/\n/g, ' | ')}`);
       
       // Count confirmed patterns (robust behaviors we've learned)
       const confirmedPatterns = memory.getConfirmedPatternCount();
@@ -157,16 +194,20 @@ export async function runOrchestrator(options: OrchestratorOptions): Promise<Exp
         }
       }
       
-      // Hard circuit breaker: if clicking a confirmed pattern too many times, force done()
-      // Count how many times we've clicked something that matches a confirmed pattern
-      // After 3 clicks of a confirmed pattern, force done() - the LLM clearly understands this interaction
+      // Hard circuit breaker: if clicking a confirmed pattern too many times AND we have multiple confirmed patterns
+      // Only force done() if we've explored multiple element types, not just one
       if (action.type === 'click') {
-        const confirmedPattern = memory.getMatchingPattern('click', action.selector);
-        if (confirmedPattern && confirmedPattern.confirmed && confirmedPattern.count >= 3) {
-          report?.log(`[CIRCUIT BREAKER] Pattern "${confirmedPattern.targetDescription}" clicked ${confirmedPattern.count}x. Forcing done() to synthesize findings.`);
+        const confirmedPattern = memory.getMatchingPattern('click');
+        const confirmedCount = memory.getConfirmedPatternCount();
+        
+        // Only force done() if:
+        // 1. We have at least 2 confirmed patterns (explored multiple element types)
+        // 2. The current pattern has been clicked 4+ times (really overdoing it)
+        if (confirmedPattern && confirmedPattern.confirmed && confirmedPattern.count >= 4 && confirmedCount >= 2) {
+          report?.log(`[CIRCUIT BREAKER] Pattern "${confirmedPattern.targetDescription}" clicked ${confirmedPattern.count}x with ${confirmedCount} confirmed patterns. Forcing done().`);
           action = { 
             type: 'done', 
-            understanding: `Exploration complete. Key interactions: job listing selection updates details panel, Easy Apply opens application modal, filters available.`,
+            understanding: `Exploration complete. Discovered ${confirmedCount} interaction patterns.`,
             pageType: memory.getCurrentPageId() || 'unknown',
             keyFindings: memory.getAllPatternDescriptions()
           };
@@ -203,6 +244,33 @@ export async function runOrchestrator(options: OrchestratorOptions): Promise<Exp
 
       // Handle the action
       if (action.type === 'done') {
+        // Run final consolidation before finishing
+        report?.startAction('Final consolidation');
+        const consolidationInput = memory.getConsolidationInput();
+        
+        if (consolidationInput.rawObservations.length > 0 || consolidationInput.pendingObservations.length > 0) {
+          try {
+            const consolidationResult = await runConsolidator({
+              llm,
+              input: {
+                rawObservations: consolidationInput.rawObservations,
+                existingPatterns: consolidationInput.existingPatterns,
+                truncatedDom: currentDom.slice(0, 3000),
+              },
+            });
+            
+            const newPatterns = consolidatorOutputToPatterns(consolidationResult);
+            memory.updatePatternsFromConsolidation(newPatterns);
+            report?.log(`[Final Consolidation] ${newPatterns.length} patterns, ${newPatterns.filter(p => p.confirmed).length} confirmed`);
+            report?.endAction(true);
+          } catch (error) {
+            report?.log(`[Final Consolidation Error] ${error}`);
+            report?.endAction(false, String(error));
+          }
+        } else {
+          report?.endAction(true);
+        }
+        
         // Exploration complete - summarize all pages
         logger.info('Exploration complete, summarizing pages');
         
@@ -224,10 +292,23 @@ export async function runOrchestrator(options: OrchestratorOptions): Promise<Exp
         // Add final understanding to current page
         memory.enrichCurrentPage(action.understanding);
 
+        // Merge LLM-provided keyElements with memory-discovered selectors
+        const discoveredSelectors = memory.getDiscoveredSelectors();
+        const llmKeyElements = action.keyElements || {};
+        
+        // Merge: prefer LLM-provided values, fall back to discovered
+        const mergedKeyElements = {
+          ...discoveredSelectors,
+          ...Object.fromEntries(
+            Object.entries(llmKeyElements).filter(([_, v]) => v !== undefined)
+          ),
+        };
+
         const phaseOutput = JSON.stringify({
           understanding: action.understanding,
           pageType: action.pageType,
           keyFindings: action.keyFindings,
+          keyElements: mergedKeyElements,
           pagesExplored: memory.getPageIds(),
         }, null, 2);
         report?.addPhaseOutput('exploration', phaseOutput, true, 0);
@@ -237,6 +318,7 @@ export async function runOrchestrator(options: OrchestratorOptions): Promise<Exp
           pages: memory.getAllPages(),
           navigationPath: memory.getNavigationPath(),
           finalUnderstanding: memory.getFinalUnderstanding(),
+          keyElements: mergedKeyElements,
         };
       }
 
@@ -264,19 +346,19 @@ export async function runOrchestrator(options: OrchestratorOptions): Promise<Exp
         // Build rich action description
         actionDesc = `${describeActionSimple(action, result)} → ${changeAnalysis.description} [${changeAnalysis.changeType}]`;
         
-        // Only record patterns for actions that actually did something
+        // Only record observations for actions that actually did something
         // Skip no_change and minor_change - they don't teach us anything useful
         if (changeAnalysis.changeType !== 'no_change' && changeAnalysis.changeType !== 'minor_change') {
-          memory.addPatternObservation({
+          memory.addRawObservation({
             action: action.type,
             selector: (action as { selector?: string }).selector,
             elementType: changeAnalysis.elementType,
             effect: changeAnalysis.description,
             changeType: changeAnalysis.changeType,
           });
-          report?.log(`[Pattern Added] ${action.type} ${changeAnalysis.elementType} → ${changeAnalysis.description}`);
+          report?.log(`[Observation Added] ${action.type} ${changeAnalysis.elementType} → ${changeAnalysis.description}`);
         } else {
-          report?.log(`[No Pattern] ${action.type} produced ${changeAnalysis.changeType} - skipping pattern recording`);
+          report?.log(`[No Observation] ${action.type} produced ${changeAnalysis.changeType} - skipping`);
         }
         
         // If it's a new page type, update memory
@@ -324,8 +406,8 @@ export async function runOrchestrator(options: OrchestratorOptions): Promise<Exp
       // CRITICAL: If this action matched a confirmed pattern (after enrichment), tell the LLM explicitly
       lastActionResult = actionDesc;
       
-      if (result.success && action.type === 'click' && action.selector) {
-        const matchedPattern = memory.getMatchingPattern('click', action.selector);
+      if (result.success && action.type === 'click' && changeAnalysis) {
+        const matchedPattern = memory.getMatchingPattern('click', changeAnalysis.elementType);
         if (matchedPattern && matchedPattern.confirmed) {
           lastActionResult = `${actionDesc}
 
@@ -338,7 +420,30 @@ export async function runOrchestrator(options: OrchestratorOptions): Promise<Exp
       }
     }
 
-    // Max steps reached
+    // Max steps reached - run final consolidation
+    report?.startAction('Final consolidation (max steps)');
+    const consolidationInput = memory.getConsolidationInput();
+    
+    if (consolidationInput.rawObservations.length > 0) {
+      try {
+        const consolidationResult = await runConsolidator({
+          llm,
+          input: {
+            rawObservations: consolidationInput.rawObservations,
+            existingPatterns: consolidationInput.existingPatterns,
+          },
+        });
+        
+        const newPatterns = consolidatorOutputToPatterns(consolidationResult);
+        memory.updatePatternsFromConsolidation(newPatterns);
+        report?.endAction(true);
+      } catch (error) {
+        report?.endAction(false, String(error));
+      }
+    } else {
+      report?.endAction(true);
+    }
+    
     logger.info('Max exploration steps reached');
     
     return {
@@ -466,4 +571,3 @@ function describeActionSimple(action: ExplorerAction, result: ActionResult): str
       return 'Action performed';
   }
 }
-

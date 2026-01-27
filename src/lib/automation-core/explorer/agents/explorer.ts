@@ -17,9 +17,16 @@ Interact with the page: click things, scroll around, see what changes. Build und
 
 The DOM shows elements in a tree. Clickable elements have [CLICK: "selector"] - use that exact selector.
 
+EXPLORATION STRATEGY:
+1. Explore DIFFERENT element types - don't just click job listings repeatedly
+2. Try filters, apply buttons, pagination, modals, dropdowns
+3. If you've confirmed a pattern (e.g., clicking job listings), move on to other elements
+4. Understand the FULL workflow: filtering → selecting → applying
+
 RULES:
 1. ONLY use selectors from [CLICK: "..."]. Never invent selectors.
-2. Use observe() to refresh the DOM after interactions.`;
+2. Use observe() to refresh the DOM after interactions.
+3. Call done() only when you understand multiple interaction types, not just one.`;
 
 function buildExplorerPrompt(
   dom: string,
@@ -34,11 +41,18 @@ function buildExplorerPrompt(
   
   if (lastActionResult && lastActionResult.includes('PATTERN ALREADY CONFIRMED')) {
     // Extract just the warning part
-    warningSection += `\n🚨 STOP! You already understand this behavior. Click something DIFFERENT (filters, apply button) or call done().\n`;
+    warningSection += `\n🚨 STOP! You already understand this behavior. Try these DIFFERENT elements:
+   - Filter buttons (Date posted, Experience level, etc.)
+   - Apply button (see what happens when you apply)
+   - Pagination (next page, page numbers)
+   - Save/bookmark button
+   - Close/dismiss buttons for any open modals\n`;
   }
   
-  if (discoveryCount >= 1) {
-    warningSection += `\n⚠️ You have ${discoveryCount} confirmed pattern(s). Explore DIFFERENT elements or finish with done().\n`;
+  if (discoveryCount >= 1 && discoveryCount < 3) {
+    warningSection += `\n⚠️ You have ${discoveryCount} confirmed pattern(s). Explore MORE element types before calling done().\n`;
+  } else if (discoveryCount >= 3) {
+    warningSection += `\n✅ You have ${discoveryCount} confirmed patterns. You can call done() if you understand the page workflow.\n`;
   }
 
   // Simpler prompt structure:
@@ -178,6 +192,21 @@ const explorerTools = [
             items: { type: 'string' },
             description: 'Specific discoveries: what buttons do, how navigation works, what filters exist, etc.',
           },
+          key_elements: {
+            type: 'object',
+            description: 'Important selectors discovered during exploration. Include any you found for: filter_button, apply_button, job_listings (array), search_input, pagination, close_button',
+            properties: {
+              filter_button: { type: 'string', description: 'Selector that opens the filter modal/dropdown' },
+              apply_button: { type: 'string', description: 'Selector for the apply/submit button' },
+              job_listings: { 
+                type: 'array', 
+                items: { type: 'string' },
+                description: 'Selectors for individual job listing items (first few examples)' 
+              },
+              search_input: { type: 'string', description: 'Selector for the search input field' },
+              pagination: { type: 'string', description: 'Selector for pagination controls' },
+            },
+          },
         },
         required: ['understanding', 'page_type', 'key_findings'],
       },
@@ -185,12 +214,21 @@ const explorerTools = [
   },
 ];
 
+export interface KeyElements {
+  filter_button?: string;
+  apply_button?: string;
+  job_listings?: string[];
+  search_input?: string;
+  pagination?: string;
+  [key: string]: string | string[] | undefined;  // Allow additional elements
+}
+
 export type ExplorerAction = 
   | { type: 'click'; selector: string; reason: string }
   | { type: 'scroll'; direction: 'down' | 'up'; reason: string }
   | { type: 'type_text'; selector: string; text: string; reason: string }
   | { type: 'observe'; what: string }
-  | { type: 'done'; understanding: string; pageType: string; keyFindings: string[] };
+  | { type: 'done'; understanding: string; pageType: string; keyFindings: string[]; keyElements?: KeyElements };
 
 export interface ExplorerOptions {
   llm: BaseChatModel;
@@ -238,20 +276,36 @@ export async function runExplorer(options: ExplorerOptions): Promise<ExplorerDec
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const modelWithTools = (llm as any).bindTools(explorerTools);
-  const response = await modelWithTools.invoke(messages) as AIMessage;
+  
+  report?.log(`[EXPLORER] About to invoke LLM with ${messages.length} messages`);
+  
+  let response: AIMessage;
+  try {
+    response = await modelWithTools.invoke(messages) as AIMessage;
+  } catch (invokeError) {
+    report?.log(`[EXPLORER ERROR] LLM invoke failed: ${invokeError}`);
+    return {
+      action: { type: 'observe', what: 'page after LLM error' },
+      rawResponse: new AIMessage(''),
+    };
+  }
 
   // Defensive check for undefined response
   if (!response) {
+    report?.log(`[EXPLORER ERROR] LLM returned undefined response`);
     return {
       action: { type: 'observe', what: 'page after empty LLM response' },
       rawResponse: new AIMessage(''),
     };
   }
 
+  report?.log(`[EXPLORER] LLM response received. tool_calls: ${JSON.stringify(response.tool_calls?.map(tc => tc.name) || 'none')}`);
+
   // Extract tool call
   const toolCalls = response.tool_calls;
   const toolCall = toolCalls && toolCalls.length > 0 ? toolCalls[0] : null;
   if (!toolCall) {
+    report?.log(`[EXPLORER] No tool call in response, defaulting to observe`);
     // No tool call - treat as observe request
     return {
       action: { type: 'observe', what: 'page' },
@@ -300,6 +354,7 @@ function parseToolCall(toolCall: { name: string; args: Record<string, unknown> }
         understanding: toolCall.args.understanding as string,
         pageType: toolCall.args.page_type as string,
         keyFindings: (toolCall.args.key_findings as string[]) || [],
+        keyElements: (toolCall.args.key_elements as KeyElements) || undefined,
       };
     default:
       return { type: 'observe', what: 'page' };
