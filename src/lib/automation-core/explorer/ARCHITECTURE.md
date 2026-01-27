@@ -36,9 +36,11 @@ The system is being built in two phases:
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Multi-agent orchestration | ✅ Done | Orchestrator manages Explorer, ChangeAnalyzer |
+| Multi-agent orchestration | ✅ Done | Orchestrator manages Explorer, ChangeAnalyzer, Consolidator, Summarizer |
 | Explorer Agent | ✅ Done | click, scroll, type_text, observe, done tools |
-| ChangeAnalyzer Agent | ✅ Done | Classifies DOM changes, provides elementType |
+| ChangeAnalyzer Agent | ✅ Done | Unified agent: classifies DOM changes, element types, AND page types |
+| Consolidator Agent | ✅ Done | LLM-based pattern recognition and consolidation |
+| Summarizer Agent | ✅ Done | Compresses observations into concise summaries |
 | Memory Store | ✅ Done | Pattern consolidation, page graph |
 | DOM Serialization | ✅ Done | Clickable elements with selectors |
 | Loop Detection | ✅ Done | Pattern-based + circuit breakers |
@@ -186,39 +188,69 @@ interface Phase1Output {
 | `scroll` | `direction`, `reason` | `{ success, new_content_loaded }` | Scrolls viewport |
 | `type_text` | `selector`, `text`, `reason` | `{ success, error? }` | Types into input |
 | `observe` | `what` | `{ dom, url, title }` | Gets fresh page state |
-| `done` | `understanding`, `page_type`, `findings` | — | **HANDOFF: Signals exploration complete** |
+| `done` | `understanding`, `page_type`, `key_findings`, `key_elements?` | — | **HANDOFF: Signals exploration complete** |
 
 **Handoff Triggers:**
-- `done()` called → Orchestrator finalizes, returns result
-- URL changed after `click()` → Orchestrator calls **Classifier Agent**
+- `done()` called → Orchestrator runs final consolidation, summarizes pages, returns result
+- After ANY action → Orchestrator calls **ChangeAnalyzer** to analyze what changed
 
 ---
 
-### 2. Classifier Agent
+### 2. ChangeAnalyzer Agent
 
-**Purpose:** Determine if URL change means new page type or same page with different data.
+**Purpose:** Unified agent that analyzes ALL DOM changes after actions. Handles:
+- URL change classification (is this a new page type?)
+- Same-page change classification (modal opened? content loaded?)
+- Element type classification (what was clicked?)
 
 **Tools Available:**
 
 | Tool | Args | Returns | Side Effects |
 |------|------|---------|--------------|
-| `classify` | `page_id`, `is_new_page`, `understanding`, `came_from?`, `via_action?` | — | **HANDOFF: Returns to Explorer** |
+| `analyze_change` | `description`, `element_type`, `change_type`, `page_type`, `is_new_page_type`, `page_understanding` | — | Returns analysis to Orchestrator |
 
 **When Invoked:** 
-- Orchestrator detects ANY URL change
-- Orchestrator calls Classifier with: old URL, new URL, **old DOM, new DOM**, known pages
+- After EVERY action (click, scroll, type_text)
+- Receives: before/after DOM, before/after URL, action description
 
 **Key Design Decision:**
-- Classifier receives BOTH old and new DOMs to compare structure
-- LLM-powered classification decides if same page type or different
-- No code-level exceptions - let the LLM decide based on DOM comparison
+- Single agent handles both URL-change and same-page change analysis
+- Classifies elements by their EFFECT (filter modal appeared → "filter button")
+- Hard override: cannot claim "navigation" if URL didn't actually change
 
-**Handoff:**
-- After `classify()` → Orchestrator updates memory → **Returns to Explorer Agent**
+**Output:**
+- `changeType`: navigation, modal_opened, modal_closed, content_loaded, content_removed, selection_changed, no_change, minor_change
+- `elementType`: "job listing", "filter button", "apply button", "close button", etc.
+- `isNewPageType`: true only if URL changed AND fundamentally different page
 
 ---
 
-### 3. Summarizer Agent
+### 3. Consolidator Agent
+
+**Purpose:** LLM-based pattern recognition. Groups similar behaviors and determines confidence levels.
+
+**Tools Available:**
+
+| Tool | Args | Returns | Side Effects |
+|------|------|---------|--------------|
+| `consolidate_patterns` | `patterns[]`, `uncategorized[]` | — | Returns consolidated patterns |
+
+**When Invoked:**
+- After every 3 observations (batch processing)
+- If 30+ seconds since last consolidation
+- Before final output (final consolidation)
+
+**Key Design Decision:**
+- Uses LLM (not code) to recognize patterns semantically
+- Groups "click #ember200 → details" and "click #ember210 → details" as same pattern
+- Tracks confidence: "testing" (seen once) vs "confirmed" (seen 2+ times)
+
+**Handoff:**
+- After consolidation → Orchestrator updates memory patterns → Continues exploration
+
+---
+
+### 4. Summarizer Agent
 
 **Purpose:** Compress observations into concise understanding.
 
@@ -229,9 +261,8 @@ interface Phase1Output {
 | `summarize` | `page_id`, `summary` | — | **HANDOFF: Returns to caller** |
 
 **When Invoked:**
-- Before leaving a page (Explorer navigating away)
-- When exploration completes (final summaries)
-- Periodically if page has many observations
+- Before leaving a page (when URL changes to new page type)
+- When exploration completes (final summaries for all pages)
 
 **Handoff:**
 - After `summarize()` → Orchestrator stores summary → Returns to previous agent or finishes
@@ -255,26 +286,45 @@ interface Phase1Output {
         click/scroll      observe()           done()
               │                 │                 │
               ▼                 │                 ▼
-        Execute action          │            ┌────────┐
-              │                 │            │SUMMARIZE│
-              ▼                 │            │all pages│
-        URL changed?            │            └────────┘
-         /        \             │                 │
-        NO        YES           │                 ▼
-        │          │            │              FINISH
-        │          ▼            │
-        │   ┌─────────────┐     │
-        │   │ CLASSIFIER  │     │
-        │   │   AGENT     │     │
-        │   └─────────────┘     │
+        Execute action          │          ┌──────────────┐
+              │                 │          │CONSOLIDATOR  │
+              ▼                 │          │(final)       │
+      ┌───────────────┐         │          └──────────────┘
+      │CHANGE ANALYZER│         │                 │
+      │(analyze_change)│        │                 ▼
+      └───────────────┘         │          ┌──────────────┐
+              │                 │          │SUMMARIZER    │
+              ▼                 │          │(each page)   │
+        Add observation         │          └──────────────┘
+              │                 │                 │
+              ▼                 │                 ▼
+        New page type?          │              FINISH
+         /        \             │
+        NO        YES           │
         │          │            │
         │          ▼            │
-        │    classify()         │
+        │   ┌─────────────┐     │
+        │   │ SUMMARIZER  │     │
+        │   │ (old page)  │     │
+        │   └─────────────┘     │
         │          │            │
         │          ▼            │
         │   Update Memory       │
         │          │            │
         └──────────┴────────────┘
+                   │
+                   ▼
+        Should consolidate?
+         /        \
+        NO        YES
+        │          │
+        │          ▼
+        │   ┌─────────────┐
+        │   │CONSOLIDATOR │
+        │   │   AGENT     │
+        │   └─────────────┘
+        │          │
+        └──────────┤
                    │
                    ▼
             Back to EXPLORER
@@ -287,77 +337,109 @@ interface Phase1Output {
 
 The orchestrator (code) handles:
 
-### 1. Tool Execution
+### 1. Action Execution with DOM Capture
 ```typescript
-async function executeTool(agent: Agent, toolCall: ToolCall): Promise<ToolResult> {
-  switch (toolCall.name) {
+async function executeAction(page: Page, action: ExplorerAction): Promise<ActionResult> {
+  const oldUrl = (await page.getState()).url;
+
+  switch (action.type) {
     case 'click':
-      const oldUrl = browser.getUrl();
-      const result = await browser.click(toolCall.args.selector);
-      const newUrl = browser.getUrl();
+      // Capture DOM before click
+      const beforeState = await page.getState();
+      const beforeDom = domTreeToString(beforeState.elementTree);
+      
+      await page.clickSelector(action.selector);
+      await new Promise(resolve => setTimeout(resolve, 1000)); // Wait for updates
+      
+      // Capture DOM after click
+      const newState = await page.getState();
+      const afterDom = domTreeToString(newState.elementTree);
+      
       return { 
-        success: result.success, 
-        url_changed: oldUrl !== newUrl,
-        new_url: newUrl 
+        success: true, 
+        urlChanged: newState.url !== oldUrl,
+        newUrl: newState.url,
+        oldUrl,
+        beforeDom,
+        afterDom
       };
-    case 'observe':
-      return { dom: await browser.getDom(), url: browser.getUrl() };
-    // ... etc
+    // ... scroll, type_text, observe
   }
 }
 ```
 
-### 2. Handoff Decisions
+### 2. Loop Detection & Circuit Breakers
 ```typescript
-async function handleToolResult(agent: Agent, toolCall: ToolCall, result: ToolResult) {
-  // Check for handoff triggers
-  if (toolCall.name === 'click' && result.url_changed) {
-    // HANDOFF to Classifier
-    await runClassifierAgent(result.old_url, result.new_url);
-    // Then return to Explorer with fresh context
-  }
-  
-  if (toolCall.name === 'done') {
-    // HANDOFF to Summarizer for each page
-    for (const pageId of memory.getPageIds()) {
-      await runSummarizerAgent(pageId);
-    }
-    // Then FINISH
-    return { finished: true };
-  }
-  
-  // No handoff - continue with same agent
-  return { finished: false, continueAgent: agent };
+// Detect action loops
+const isClickLoop = lastActions.every(a => a === lastActions[0] && a.startsWith('Clicked'));
+const isScrollLoop = last5Actions.every(a => a.startsWith('Scrolled'));
+
+// Circuit breakers
+if (sameClickCount >= 4) {
+  action = { type: 'observe', what: 'page after blocked repeated click' };
+}
+if (confirmedPattern.count >= 4 && confirmedCount >= 2) {
+  action = { type: 'done', understanding: '...', keyFindings: memory.getAllPatternDescriptions() };
+}
+if (observeCount >= 4) {
+  action = { type: 'done', ... }; // Force finish if stuck observing
 }
 ```
 
-### 3. Context Building per Agent
+### 3. Agent Coordination
+```typescript
+// After EVERY action: call ChangeAnalyzer
+const changeAnalysis = await runChangeAnalyzer({
+  llm, action: describeAction(action),
+  beforeUrl, afterUrl, beforeDom, afterDom,
+  knownPageTypes: memory.getPageIds(),
+  currentPageType: memory.getCurrentPageId(),
+});
 
-Each agent gets different context:
+// Periodically: call Consolidator
+if (memory.shouldConsolidate()) {
+  const result = await runConsolidator({ llm, input: memory.getConsolidationInput() });
+  memory.updatePatternsFromConsolidation(consolidatorOutputToPatterns(result));
+}
+
+// On new page type: call Summarizer for old page
+if (changeAnalysis.isNewPageType) {
+  const summary = await runSummarizer({ llm, pageId: oldPageId, ... });
+  memory.updatePageSummary(oldPageId, summary.summary);
+  memory.updateFromClassification({ ... });
+}
+
+// On done(): call Consolidator (final) + Summarizer (each page)
+```
+
+### 4. Context Building per Agent
 
 ```typescript
-function buildContext(agent: AgentType): Context {
-  switch (agent) {
-    case 'explorer':
-      return {
-        systemPrompt: EXPLORER_SYSTEM_PROMPT,
-        tools: [clickTool, scrollTool, typeTool, observeTool, doneTool],
-        userMessage: buildExplorerMessage(memory.getSummary(), currentDom, task)
-      };
-    case 'classifier':
-      return {
-        systemPrompt: CLASSIFIER_SYSTEM_PROMPT,
-        tools: [classifyTool],
-        userMessage: buildClassifierMessage(oldUrl, newUrl, newDom, memory.getPageIds())
-      };
-    case 'summarizer':
-      return {
-        systemPrompt: SUMMARIZER_SYSTEM_PROMPT,
-        tools: [summarizeTool],
-        userMessage: buildSummarizerMessage(pageId, memory.getObservations(pageId))
-      };
-  }
-}
+// Explorer: gets DOM, memory summary, task, last action result
+runExplorer({
+  llm, dom: currentDom, memorySummary: memory.getSummary(),
+  task, currentPageId: memory.getCurrentPageId(),
+  lastActionResult,                     // Prominent: what just happened
+  discoveryCount: confirmedPatternCount, // Encourage synthesis
+  loopWarning: isLooping ? lastAction : undefined,
+});
+
+// ChangeAnalyzer: gets before/after DOM, before/after URL
+runChangeAnalyzer({
+  llm, action, beforeUrl, afterUrl, beforeDom, afterDom,
+  knownPageTypes, currentPageType,
+});
+
+// Consolidator: gets raw observations, existing patterns
+runConsolidator({
+  llm, input: { rawObservations, existingPatterns, truncatedDom },
+});
+
+// Summarizer: gets page observations and current understanding
+runSummarizer({
+  llm, pageId, observations: page.rawObservations,
+  currentUnderstanding: page.understanding,
+});
 ```
 
 ---
@@ -366,11 +448,12 @@ function buildContext(agent: AgentType): Context {
 
 | Tool Call | Memory Update |
 |-----------|---------------|
-| `click(selector, reason)` | Record action in navigation log |
-| `observe(what)` | (no update, just returns data) |
-| `classify(page_id, ...)` | Create/update PageNode, add edges |
-| `summarize(page_id, summary)` | Store summary in PageNode |
-| `done(...)` | Mark exploration complete |
+| `click(selector, reason)` | After ChangeAnalyzer: `addRawObservation()` with element type and effect |
+| `observe(what)` | (no update, just returns fresh DOM) |
+| `analyze_change(...)` | May call `updateFromClassification()` if new page type |
+| `consolidate_patterns(...)` | `updatePatternsFromConsolidation()` replaces patterns array |
+| `summarize(page_id, summary)` | `updatePageSummary()` stores summary, clears raw observations |
+| `done(...)` | Final consolidation + summarization, then return result |
 
 ---
 
@@ -380,33 +463,38 @@ function buildContext(agent: AgentType): Context {
 ┌─────────────────────────────────────────────────────────────┐
 │                      ORCHESTRATOR                           │
 │  - Executes tool calls from agents                          │
-│  - Decides handoffs based on tool results                   │
-│  - Builds context for each agent                           │
-│  - Manages the main loop                                    │
+│  - Calls ChangeAnalyzer after every action                  │
+│  - Calls Consolidator periodically (every 3 observations)   │
+│  - Calls Summarizer when leaving pages or finishing         │
+│  - Manages the main loop with circuit breakers              │
 └─────────────────────────────────────────────────────────────┘
-           │                    │                    │
-           ▼                    ▼                    ▼
-┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
-│    EXPLORER      │  │   CLASSIFIER     │  │   SUMMARIZER     │
-│  Tools: click,   │  │  Tools: classify │  │  Tools: summarize│
-│  scroll, type,   │  │                  │  │                  │
-│  observe, done   │  │                  │  │                  │
-└──────────────────┘  └──────────────────┘  └──────────────────┘
-           │                    │                    │
-           └────────────────────┼────────────────────┘
+           │              │              │              │
+           ▼              ▼              ▼              ▼
+┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+│   EXPLORER   │  │CHANGE        │  │CONSOLIDATOR  │  │ SUMMARIZER   │
+│  click,      │  │ANALYZER      │  │consolidate_  │  │ summarize    │
+│  scroll,     │  │analyze_change│  │patterns      │  │              │
+│  type_text,  │  │              │  │              │  │              │
+│  observe,    │  │              │  │              │  │              │
+│  done        │  │              │  │              │  │              │
+└──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘
+           │              │              │              │
+           └──────────────┴──────────────┴──────────────┘
+                                │
                                 ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                       MEMORY STORE                          │
 │  - Map<page_id, PageNode>                                   │
-│  - Updated by orchestrator after tool calls                 │
-│  - Serialized for agent context                            │
+│  - patterns: BehaviorPattern[] (from Consolidator)          │
+│  - rawObservations: string[] (from ChangeAnalyzer)          │
+│  - pendingObservations: queue for consolidation             │
 └─────────────────────────────────────────────────────────────┘
                                 │
                                 ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                    BROWSER INTERFACE                        │
-│  - Execute actions (click, scroll, type)                   │
-│  - Get DOM state                                            │
+│                    BROWSER INTERFACE (Page)                 │
+│  - Execute actions (clickSelector, scrollToNextPage, etc.) │
+│  - Get DOM state (getState → elementTree)                   │
 │  - Track URL                                                │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -421,68 +509,100 @@ function buildContext(agent: AgentType): Context {
 const explorerTools = [
   {
     name: 'click',
-    description: 'Click an element on the page',
+    description: 'Click an element. May open modals, navigate, toggle state, or load content.',
     parameters: {
-      selector: { type: 'string', description: 'CSS selector - copy exactly from [CLICK: "..."]' },
-      reason: { type: 'string', description: 'Why clicking this element' }
-    },
-    returns: '{ success: boolean, url_changed: boolean, new_url?: string, error?: string }'
+      selector: { type: 'string', description: 'CSS selector - copy exactly from [CLICK: "..."] in the DOM' },
+      reason: { type: 'string', description: 'What you expect to learn or happen' }
+    }
   },
   {
     name: 'scroll',
-    description: 'Scroll the page to see more content',
+    description: 'Scroll to reveal more content, pagination, or hidden elements.',
     parameters: {
       direction: { type: 'string', enum: ['down', 'up'] },
-      reason: { type: 'string' }
-    },
-    returns: '{ success: boolean, new_content_loaded: boolean }'
+      reason: { type: 'string', description: 'What you hope to find' }
+    }
   },
   {
     name: 'type_text',
     description: 'Type text into an input field',
     parameters: {
-      selector: { type: 'string' },
-      text: { type: 'string' },
-      reason: { type: 'string' }
-    },
-    returns: '{ success: boolean, error?: string }'
+      selector: { type: 'string', description: 'CSS selector of the input' },
+      text: { type: 'string', description: 'Text to type' },
+      reason: { type: 'string', description: 'Why you are typing this' }
+    }
   },
   {
     name: 'observe',
-    description: 'Get fresh DOM state of current page',
+    description: 'Get a fresh snapshot of the DOM. Use after actions that might have changed content.',
     parameters: {
-      what: { type: 'string', description: 'What to observe (e.g., "page", "modal")' }
-    },
-    returns: '{ dom: string, url: string, title: string }'
+      what: { type: 'string', description: 'What changed you want to see (e.g., "modal contents", "updated list")' }
+    }
   },
   {
     name: 'done',
-    description: 'Signal exploration is complete. HANDOFF: Triggers summarization and finish.',
+    description: 'Call when you understand enough to explain how to accomplish the task on this site.',
     parameters: {
-      understanding: { type: 'string', description: 'Overall understanding of the site' },
-      page_type: { type: 'string', description: 'Type of current page' },
-      key_findings: { type: 'array', items: { type: 'string' } }
-    },
-    returns: 'void (triggers handoff)'
+      understanding: { type: 'string', description: 'Full explanation of how the site works' },
+      page_type: { type: 'string', description: 'What kind of page this is' },
+      key_findings: { type: 'array', items: { type: 'string' }, description: 'Specific discoveries' },
+      key_elements: { 
+        type: 'object', 
+        description: 'Important selectors: filter_button, apply_button, job_listings[], search_input, pagination'
+      }
+    }
   }
 ];
 ```
 
-### Classifier Agent Tools
+### ChangeAnalyzer Agent Tools
 
 ```typescript
-const classifierTools = [
+const changeAnalyzerTools = [
   {
-    name: 'classify',
-    description: 'Classify whether this is a new page or same page with different data. HANDOFF: Returns control to Explorer.',
+    name: 'analyze_change',
+    description: 'Report what changed after the action',
     parameters: {
-      page_id: { type: 'string', description: 'Semantic name for this page type' },
-      is_new_page: { type: 'boolean', description: 'True if this is a new page type' },
-      understanding: { type: 'string', description: 'What this page is about' },
-      came_from: { type: 'string', description: 'If new page, which page_id we came from' },
-      via_action: { type: 'string', description: 'What action led to this page' }
-    },
-    returns: 'void (triggers handoff back to Explorer)'
+      description: { type: 'string', description: 'Human-readable description of what changed' },
+      element_type: { 
+        type: 'string', 
+        description: 'Classify element by EFFECT: "filter button", "apply button", "job listing", "close button", "navigation link", "dropdown button", "save button", "pagination control"'
+      },
+      change_type: { 
+        type: 'string', 
+        enum: ['navigation', 'modal_opened', 'modal_closed', 'content_loaded', 'content_removed', 'selection_changed', 'no_change', 'minor_change']
+      },
+      page_type: { type: 'string', description: 'Semantic name for this page type' },
+      is_new_page_type: { type: 'boolean', description: 'True only if URL changed AND fundamentally different page' },
+      page_understanding: { type: 'string', description: 'What this page/state offers' }
+    }
+  }
+];
+```
+
+### Consolidator Agent Tools
+
+```typescript
+const consolidatorTools = [
+  {
+    name: 'consolidate_patterns',
+    description: 'Report consolidated behavioral patterns from observations',
+    parameters: {
+      patterns: {
+        type: 'array',
+        items: {
+          id: { type: 'string', description: 'Unique pattern ID' },
+          element_type: { type: 'string', description: 'Type of element' },
+          action: { type: 'string', description: 'Action type: click, scroll, type_text' },
+          effect: { type: 'string', description: 'DETAILED description of what happens' },
+          change_type: { type: 'string', enum: ['navigation', 'modal_opened', ...] },
+          confidence: { type: 'string', enum: ['testing', 'confirmed'] },
+          count: { type: 'number', description: 'Times observed' },
+          example_selectors: { type: 'array', items: { type: 'string' } }
+        }
+      },
+      uncategorized: { type: 'array', items: { type: 'string' } }
+    }
   }
 ];
 ```
@@ -493,12 +613,11 @@ const classifierTools = [
 const summarizerTools = [
   {
     name: 'summarize',
-    description: 'Provide condensed summary of a page. HANDOFF: Returns to orchestrator.',
+    description: 'Provide condensed summary of a page.',
     parameters: {
       page_id: { type: 'string', description: 'Which page this summary is for' },
       summary: { type: 'string', description: 'Condensed understanding of the page' }
-    },
-    returns: 'void (summary stored, handoff complete)'
+    }
   }
 ];
 ```
@@ -507,96 +626,120 @@ const summarizerTools = [
 
 ## Example: Full Exploration Session
 
-### Turn 1: Explorer starts
+### Turn 1: Explorer starts, clicks
 ```
+[Orchestrator] Initial page analysis via ChangeAnalyzer
+  → pageType: "homepage", understanding: "LinkedIn landing page"
+  → memory.updateFromClassification()
+
 [Orchestrator] → Explorer Agent
-Context: { dom: "...", memory: "(empty)", task: "Find jobs" }
+Context: { dom: "...", memory: "PAGES: [homepage]. YOU ARE ON: homepage", task: "Find jobs" }
 Tools: [click, scroll, type_text, observe, done]
 
 [Explorer] calls: click({ selector: "#jobs-nav", reason: "Navigate to jobs section" })
 
-[Orchestrator] executes click
-Result: { success: true, url_changed: true, new_url: "linkedin.com/jobs" }
+[Orchestrator] executes click (captures beforeDom)
+  → wait 1s
+  → captures afterDom
+Result: { success: true, urlChanged: true, newUrl: "linkedin.com/jobs" }
 
-[Orchestrator] detects URL change → HANDOFF to Classifier
-```
-
-### Turn 2: Classifier classifies new page
-```
-[Orchestrator] → Classifier Agent
-Context: { 
-  old_url: "linkedin.com", 
-  new_url: "linkedin.com/jobs",
-  dom: "...",
-  known_pages: ["homepage"]
-}
-Tools: [classify]
-
-[Classifier] calls: classify({
-  page_id: "job_search",
-  is_new_page: true,
-  understanding: "Job search page with filters and listings",
-  came_from: "homepage",
-  via_action: "clicked Jobs nav"
+[Orchestrator] → ChangeAnalyzer (after action)
+  beforeUrl: "linkedin.com", afterUrl: "linkedin.com/jobs"
+  
+[ChangeAnalyzer] calls: analyze_change({
+  description: "Navigated to jobs search page",
+  element_type: "navigation link",
+  change_type: "navigation",
+  page_type: "job_search",
+  is_new_page_type: true,
+  page_understanding: "Job search with filters and listings"
 })
 
-[Orchestrator] updates memory:
-  - Creates PageNode "job_search"
-  - Adds edge: homepage → job_search via "clicked Jobs nav"
-
-[Orchestrator] → HANDOFF back to Explorer
+[Orchestrator] New page detected!
+  → Summarize old page (homepage)
+  → memory.updateFromClassification() for job_search
+  → memory.addRawObservation()
 ```
 
-### Turn 3: Explorer continues
+### Turn 2: Explorer clicks job listing
 ```
 [Orchestrator] → Explorer Agent
 Context: { 
   dom: "...(job search page)...", 
-  memory: "PAGES: [homepage, job_search]. YOU ARE ON: job_search",
-  task: "Find jobs"
+  memory: "PAGES: [homepage, job_search]. CURRENT: job_search. LEARNED: [testing] click navigation link → navigation",
+  lastActionResult: "Clicked #jobs-nav → Navigated to jobs search page"
 }
-Tools: [click, scroll, type_text, observe, done]
 
-[Explorer] calls: click({ selector: ".job-card:first", reason: "See job details" })
+[Explorer] calls: click({ selector: "#ember200", reason: "See job details" })
 
-[Orchestrator] executes click
-Result: { success: true, url_changed: false }  // Panel opened, no navigation
+[Orchestrator] executes click → captures before/after DOM
 
-[Orchestrator] no URL change → Continue with Explorer
-```
+[Orchestrator] → ChangeAnalyzer
+  beforeUrl: "linkedin.com/jobs", afterUrl: "linkedin.com/jobs" (unchanged)
 
-### Turn 4: Explorer observes panel
-```
-[Explorer] calls: observe({ what: "details panel" })
-
-[Orchestrator] returns: { dom: "...(includes panel)...", url: "..." }
-
-[Explorer] calls: done({
-  understanding: "LinkedIn jobs: search with filters, click job opens details panel",
+[ChangeAnalyzer] calls: analyze_change({
+  description: "Job details panel updated with title, company, description",
+  element_type: "job listing",
+  change_type: "content_loaded",
   page_type: "job_search",
-  key_findings: ["Filters: date, experience, location", "Click job → panel, not new page"]
+  is_new_page_type: false,
+  page_understanding: "..."
 })
 
-[Orchestrator] → HANDOFF to Summarizer for each page
+[Orchestrator] memory.addRawObservation()
+  → pendingObservations.length = 2
 ```
 
-### Turn 5: Summarizer finalizes
+### Turn 3: Explorer clicks another job, Consolidator runs
 ```
-[Orchestrator] → Summarizer Agent (for "homepage")
-Context: { page_id: "homepage", observations: [...] }
-Tools: [summarize]
-
-[Summarizer] calls: summarize({
-  page_id: "homepage",
-  summary: "LinkedIn landing page. Nav links to Jobs, People, Posts."
-})
-
-[Orchestrator] stores summary → Next page
-
-[Orchestrator] → Summarizer Agent (for "job_search")
+[Explorer] calls: click({ selector: "#ember210", reason: "Try another job" })
 ...
+[ChangeAnalyzer] → element_type: "job listing", effect: "panel updated"
 
-[Orchestrator] → FINISH, return final result
+[Orchestrator] memory.addRawObservation()
+  → pendingObservations.length = 3
+  → shouldConsolidate() = true!
+
+[Orchestrator] → Consolidator Agent
+Context: { 
+  rawObservations: [...],
+  existingPatterns: [...]
+}
+
+[Consolidator] calls: consolidate_patterns({
+  patterns: [{
+    id: "pattern_joblist_1",
+    element_type: "job listing",
+    action: "click",
+    effect: "Updates job details panel with title, company, description, apply button",
+    change_type: "content_loaded",
+    confidence: "confirmed",  // seen 2x!
+    count: 2,
+    example_selectors: ["#ember200", "#ember210"]
+  }],
+  uncategorized: []
+})
+
+[Orchestrator] memory.updatePatternsFromConsolidation()
+  → Pattern "job listing" now confirmed!
+```
+
+### Turn 4: Explorer finishes
+```
+[Explorer] (sees confirmed patterns in memory)
+  → Calls done() with understanding
+
+[Orchestrator] Final consolidation → Summarizer for each page
+
+[Orchestrator] Merge keyElements:
+  - From memory.getDiscoveredSelectors()
+  - From action.keyElements (LLM-provided)
+
+[Orchestrator] → FINISH, return ExplorationResult {
+  success: true,
+  pages: Map<...>,
+  keyElements: { job_listings: ["#ember200", "#ember210"], ... }
+}
 ```
 
 ---
@@ -605,11 +748,13 @@ Tools: [summarize]
 
 | Trigger | From Agent | To Agent | Data Passed |
 |---------|------------|----------|-------------|
-| `click()` returns `url_changed: true` | Explorer | Classifier | old_url, new_url, new_dom, known_pages |
-| `classify()` called | Classifier | Explorer | (memory updated, fresh context) |
-| `done()` called | Explorer | Summarizer (loop) | page_id, observations for each page |
-| `summarize()` called | Summarizer | Orchestrator/Next | (summary stored) |
-| All summaries done | Summarizer | FINISH | Final result returned |
+| After ANY action | Explorer (via Orch) | ChangeAnalyzer | before/after DOM, before/after URL, action |
+| After ChangeAnalyzer | ChangeAnalyzer | (back to loop) | elementType, changeType, isNewPageType |
+| shouldConsolidate() = true | Orchestrator | Consolidator | rawObservations, existingPatterns |
+| New page type detected | Orchestrator | Summarizer | old page observations |
+| `done()` called | Explorer | Consolidator (final) | all observations |
+| After final consolidation | Consolidator | Summarizer (loop) | for each page |
+| All summaries done | Summarizer | FINISH | Final result with keyElements |
 
 ---
 
@@ -622,17 +767,33 @@ interface MemoryStore {
   pages: Map<string, PageNode>;
   currentPageId: string | null;
   previousPageId: string | null;
-  navigationPath: string[];  // breadcrumb trail
+  navigationPath: string[];       // breadcrumb trail
+  pendingObservations: RawObs[];  // queue for consolidation
+  lastConsolidationAt: number;    // timestamp
 }
 
 interface PageNode {
   id: string;                     // "homepage", "job_search"
   understanding: string;          // summarized understanding
-  rawObservations: string[];      // collected before summarization
+  rawObservations: string[];      // string descriptions of observations
+  patterns: BehaviorPattern[];    // consolidated by Consolidator agent
   incomingEdges: Edge[];          // how to reach this page
   outgoingEdges: Edge[];          // where you can go from here
   visitCount: number;             // times visited
   lastVisitedAt: number;          // timestamp
+  lastUrl: string;                // last URL seen for this page type
+}
+
+interface BehaviorPattern {
+  id: string;                     // unique pattern id
+  action: string;                 // "click", "scroll", etc.
+  targetDescription: string;      // "job listing", "filter button"
+  effect: string;                 // "updates details panel", "opens modal"
+  changeType: string;             // from ChangeAnalyzer
+  selectors: string[];            // example selectors (max 3)
+  count: number;                  // how many times observed
+  confirmed: boolean;             // true if count >= 2
+  firstSeen: number;              // timestamp
 }
 
 interface Edge {
@@ -647,32 +808,47 @@ interface Edge {
 
 ```typescript
 class MemoryStore {
-  // Update from classifier response
-  updateFromClassification(result: ClassifierResult, previousUrl: string): void;
+  // Update from ChangeAnalyzer when new page detected
+  updateFromClassification(result: ClassifierResult, previousUrl: string | null): void;
   
-  // Add pattern observation using LLM-classified element type
-  addPatternObservation(data: {
+  // Add raw observation (before consolidation)
+  addRawObservation(data: {
     action: string;
     selector?: string;
-    elementType: string;  // LLM-classified
+    elementType: string;  // from ChangeAnalyzer
     effect: string;
     changeType: string;
   }): void;
   
+  // Replace patterns with consolidated patterns from Consolidator
+  updatePatternsFromConsolidation(patterns: BehaviorPattern[]): void;
+  
+  // Get data needed for Consolidator agent
+  getConsolidationInput(): { rawObservations, existingPatterns, pendingObservations };
+  
+  // Check if consolidation should run (every 3 obs or 30s timeout)
+  shouldConsolidate(): boolean;
+  
   // Add simple string observation (warnings, notes)
   enrichCurrentPage(observation: string): void;
+  
+  // Get matching confirmed pattern (for loop detection)
+  getMatchingPattern(action: string, elementType?: string): BehaviorPattern | null;
+  
+  // Get discovered selectors organized by element type
+  getDiscoveredSelectors(): KeyElements;
   
   // Get summary for LLM context
   getSummary(): string;
   
-  // Get all page IDs (for classifier)
+  // Update page summary from Summarizer
+  updatePageSummary(pageId: string, summary: string): void;
+  
+  // Get all page IDs
   getPageIds(): string[];
   
-  // Get current page
-  getCurrentPageId(): string | null;
-  
-  // Finalize understanding (calls summarizer for each page)
-  getFinalUnderstanding(): FinalResult;
+  // Get final understanding for all pages
+  getFinalUnderstanding(): string;
 }
 ```
 
@@ -699,73 +875,142 @@ PATH: homepage → job_search
 ## Main Loop
 
 ```typescript
-async function explore(task: string, startUrl: string): Promise<ExplorationResult> {
+async function runOrchestrator(options: OrchestratorOptions): Promise<ExplorationResult> {
+  const { page, task, llm, report, maxSteps = 20 } = options;
   const memory = new MemoryStore();
-  const browser = await BrowserInterface.open(startUrl);
-  
-  let previousUrl = startUrl;
-  
-  // Initial classification
-  const initialDom = await browser.getDom();
-  const initialClassification = await classifyPage({
-    fromUrl: null,
-    toUrl: startUrl,
-    dom: initialDom,
-    knownPages: [],
+  let previousUrl = '';
+  let stepCount = 0;
+  const recentActions: string[] = [];
+  let lastActionResult: string | null = null;
+
+  // Get initial state
+  const initialState = await page.getState();
+  const initialDom = domTreeToString(initialState.elementTree, { includeSelectors: true });
+  previousUrl = initialState.url;
+
+  // Initial page analysis via ChangeAnalyzer
+  const initialAnalysis = await runChangeAnalyzer({
+    llm,
+    action: 'Page loaded',
+    beforeUrl: '',
+    afterUrl: initialState.url,
+    beforeDom: '',
+    afterDom: initialDom,
+    knownPageTypes: [],
   });
-  memory.updateFromClassification(initialClassification, null);
-  
-  // Main loop
-  while (true) {
-    const currentUrl = browser.getUrl();
-    const dom = await browser.getDom();
+  memory.updateFromClassification({
+    pageId: initialAnalysis.pageType,
+    isNewPage: true,
+    isSamePage: false,
+    understanding: initialAnalysis.pageUnderstanding,
+  }, null);
+
+  // Main exploration loop
+  while (stepCount < maxSteps) {
+    stepCount++;
+    const currentState = await page.getState();
+    let currentDom = domTreeToString(currentState.elementTree, { includeSelectors: true });
+
+    // Loop detection (click loops, scroll loops)
+    const isLooping = detectLoops(recentActions);
+    if (isLooping) {
+      memory.enrichCurrentPage(`WARNING: Loop detected - try different actions`);
+    }
+
+    // Run Consolidator if needed (every 3 observations or 30s timeout)
+    if (memory.shouldConsolidate()) {
+      const consolidationInput = memory.getConsolidationInput();
+      const consolidationResult = await runConsolidator({ llm, input: consolidationInput });
+      memory.updatePatternsFromConsolidation(consolidatorOutputToPatterns(consolidationResult));
+    }
+
+    // Ask Explorer for next action
+    const decision = await runExplorer({
+      llm, dom: currentDom, memorySummary: memory.getSummary(),
+      task, currentPageId: memory.getCurrentPageId(),
+      lastActionResult, discoveryCount: memory.getConfirmedPatternCount(),
+      loopWarning: isLooping ? recentActions.slice(-1)[0] : undefined,
+    });
+
+    let action = decision.action;
     
-    // 1. URL changed? → Classify the page
-    if (currentUrl !== previousUrl) {
-      const classification = await classifyPage({
-        fromUrl: previousUrl,
-        toUrl: currentUrl,
-        dom,
-        knownPages: memory.getPageIds(),
-      });
+    // Circuit breakers (force observe/done if stuck)
+    action = applyCircuitBreakers(action, recentActions, memory);
+
+    // Handle done() action
+    if (action.type === 'done') {
+      // Final consolidation
+      await runFinalConsolidation(llm, memory, currentDom);
       
-      // If leaving a page, summarize it first
-      if (!classification.is_same_page && memory.getCurrentPageId()) {
-        await summarizeAndStore(memory, memory.getCurrentPageId());
+      // Summarize all pages
+      for (const pageId of memory.getPageIds()) {
+        const pageNode = memory.getPage(pageId);
+        if (pageNode?.rawObservations.length > 0) {
+          const summary = await runSummarizer({ llm, pageId, ... });
+          memory.updatePageSummary(pageId, summary.summary);
+        }
       }
-      
-      memory.updateFromClassification(classification, previousUrl);
+
+      // Merge key elements from LLM + discovered selectors
+      const mergedKeyElements = {
+        ...memory.getDiscoveredSelectors(),
+        ...action.keyElements,
+      };
+
+      return {
+        success: true,
+        pages: memory.getAllPages(),
+        navigationPath: memory.getNavigationPath(),
+        finalUnderstanding: memory.getFinalUnderstanding(),
+        keyElements: mergedKeyElements,
+      };
     }
+
+    // Execute the action
+    const result = await executeAction(page, action);
     
-    // 2. Decide next action
-    const context = buildExplorerContext({
-      dom,
-      memorySummary: memory.getSummary(),
-      task,
-      currentPageId: memory.getCurrentPageId(),
-    });
-    
-    const decision = await explorer(context);
-    
-    // 3. Update memory with LLM-classified pattern
-    memory.addPatternObservation({
-      action: action.type,
-      selector: action.selector,
-      elementType: changeAnalysis.elementType,  // From ChangeAnalyzer LLM
-      effect: changeAnalysis.description,
-      changeType: changeAnalysis.changeType,
-    });
-    
-    // 4. Execute action or finish
-    if (decision.action === 'done') {
-      // Summarize current page before finishing
-      await summarizeAndStore(memory, memory.getCurrentPageId());
-      return memory.getFinalUnderstanding();
+    // Analyze what changed via ChangeAnalyzer
+    if (result.success && result.beforeDom && result.afterDom) {
+      const changeAnalysis = await runChangeAnalyzer({
+        llm, action: describeAction(action),
+        beforeUrl: result.oldUrl, afterUrl: result.newUrl,
+        beforeDom: result.beforeDom, afterDom: result.afterDom,
+        knownPageTypes: memory.getPageIds(),
+        currentPageType: memory.getCurrentPageId(),
+      });
+
+      // Only record meaningful observations
+      if (changeAnalysis.changeType !== 'no_change' && changeAnalysis.changeType !== 'minor_change') {
+        memory.addRawObservation({
+          action: action.type,
+          selector: action.selector,
+          elementType: changeAnalysis.elementType,
+          effect: changeAnalysis.description,
+          changeType: changeAnalysis.changeType,
+        });
+      }
+
+      // If new page type, summarize old page and update memory
+      if (changeAnalysis.isNewPageType && changeAnalysis.urlChanged) {
+        await summarizeOldPage(llm, memory);
+        memory.updateFromClassification({
+          pageId: changeAnalysis.pageType,
+          isNewPage: true,
+          understanding: changeAnalysis.pageUnderstanding,
+          cameFrom: changeAnalysis.cameFrom,
+          viaAction: changeAnalysis.viaAction,
+        }, previousUrl);
+      }
+
+      previousUrl = result.newUrl || previousUrl;
+      lastActionResult = buildActionResultForLLM(action, changeAnalysis, memory);
     }
-    
-    previousUrl = currentUrl;
-    await browser.execute(decision.action, decision.params);
+
+    recentActions.push(actionDesc);
   }
+
+  // Max steps reached
+  return { success: false, error: 'Max exploration steps reached', ... };
 }
 ```
 
@@ -775,10 +1020,12 @@ async function explore(task: string, startUrl: string): Promise<ExplorationResul
 
 | Event | LLM Call | Purpose |
 |-------|----------|---------|
-| URL changed | **Classifier** | Is this new page or same page with new data? |
-| Every turn | **Explorer** | What to do next? What do you observe? |
-| Leaving a page | **Summarizer** | Compress observations before switching context |
-| Done exploring | **Summarizer** | Final summary for each page |
+| After EVERY action | **ChangeAnalyzer** | What changed? Element type? New page? |
+| Every turn | **Explorer** | What to do next? |
+| Every 3 observations OR 30s timeout | **Consolidator** | Group similar behaviors into patterns |
+| New page type detected | **Summarizer** | Compress old page before switching |
+| Done exploring | **Consolidator** (final) | Final pattern consolidation |
+| Done exploring | **Summarizer** (each page) | Final summary for each page |
 
 ---
 
@@ -829,16 +1076,21 @@ Memory: Enrich current page understanding
 ```
 src/lib/automation-core/explorer/
 ├── ARCHITECTURE.md          # This document
-├── index.ts                 # Exports
-├── orchestrator.ts          # Main loop
+├── index.ts                 # Exports (orchestrator, agents, memory, types)
+├── orchestrator.ts          # Main loop with circuit breakers
+├── page-explorer.ts         # Legacy explorer (for backwards compatibility)
+├── tool-executor.ts         # Legacy tool executor (for backwards compatibility)
+├── types.ts                 # Shared types (ToolDefinition, ExplorerResult, etc.)
 ├── agents/
-│   ├── change-analyzer.ts   # DOM change classifier LLM
-│   ├── explorer.ts          # Action decider LLM
-│   └── summarizer.ts        # Observation compressor LLM (future)
-├── memory/
-│   ├── store.ts             # MemoryStore class
-│   └── types.ts             # PageNode, Edge, BehaviorPattern interfaces
-└── types.ts                 # Shared types
+│   ├── index.ts             # Agent exports
+│   ├── change-analyzer.ts   # Unified DOM change + page classification LLM
+│   ├── consolidator.ts      # LLM-based pattern recognition and consolidation
+│   ├── explorer.ts          # Action decider LLM (click, scroll, type_text, observe, done)
+│   └── summarizer.ts        # Observation compressor LLM
+└── memory/
+    ├── index.ts             # Memory exports
+    ├── store.ts             # MemoryStore class
+    └── types.ts             # PageNode, Edge, BehaviorPattern, KeyElements, ExplorationResult
 ```
 
 ---
@@ -935,12 +1187,14 @@ Separate from Phase 1 memory. Tracks:
 ```
 Phase 1 (COMPLETE ✅)
 ├── [x] Multi-agent orchestration
-├── [x] Explorer Agent
-├── [x] ChangeAnalyzer Agent
-├── [x] Memory Store with patterns
-├── [x] Loop detection
-├── [x] Better element classification
-├── [x] Key selector tracking in output
+├── [x] Explorer Agent (click, scroll, type_text, observe, done)
+├── [x] ChangeAnalyzer Agent (unified DOM + page classification)
+├── [x] Consolidator Agent (LLM-based pattern recognition)
+├── [x] Summarizer Agent
+├── [x] Memory Store with BehaviorPatterns
+├── [x] Loop detection + circuit breakers
+├── [x] Better element classification (by effect)
+├── [x] Key selector tracking in output (getDiscoveredSelectors)
 └── [ ] (Optional) FilterAnalyzer Agent for deep filter mapping
 
 Phase 2 (READY TO START ← YOU ARE HERE)

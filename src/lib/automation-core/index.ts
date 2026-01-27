@@ -3,7 +3,8 @@
  * 
  * Main entry: runOrchestrator() - Multi-agent exploration with:
  * - Explorer Agent: Navigates and observes
- * - Classifier Agent: Determines page identity
+ * - ChangeAnalyzer Agent: Classifies DOM changes and page types
+ * - Consolidator Agent: Groups behavioral patterns
  * - Summarizer Agent: Compresses understanding
  * 
  * See explorer/ARCHITECTURE.md for full design.
@@ -21,23 +22,10 @@ export {
   type PageNode,
   type Edge,
   type ClassifierResult,
+  type BehaviorPattern,
+  type KeyElements,
   MemoryStore,
 } from './explorer';
-
-// Legacy explorer (kept for backwards compatibility)
-export {
-  explorePage,
-  type ExplorePageOptions,
-  type ExplorerResult,
-  type ExplorationStep,
-} from './explorer';
-
-// Page Analyzer - one-shot analysis (simpler alternative)
-export { 
-  analyzePage, 
-  type AnalyzePageOptions, 
-  type PageUnderstanding 
-} from './page-analyzer';
 
 // Report Service - streaming reports
 export {
