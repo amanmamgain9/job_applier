@@ -8,7 +8,7 @@
  */
 
 import { addJob, updateJob, getJobs, getSettings } from '@shared/utils/storage';
-import type { ExtensionMessage } from '@shared/types/messages';
+import type { ExtensionMessage, StartDiscoveryPayload } from '@shared/types/messages';
 import { logger } from '@shared/utils';
 import { startDiscovery, stopDiscovery, getDiscoveryState, getCurrentReport } from './discovery';
 
@@ -74,14 +74,22 @@ async function handleMessage(
     
     // ---- Discovery ----
     case 'START_DISCOVERY': {
-      const { url, task = 'Explore this page to locate jobs and find how to access their apply links' } = message.payload;
+      const defaultTask = 'Explore this job board to learn how a user searches, refines listings, and reaches the primary action for a listing. Provide a concise, structured understanding suitable for automating how we find and save apply links.';
+      const defaultGoals = [
+        'Identify where the user enters search criteria (keywords, location, or equivalent).',
+        'Identify refinement controls (filters, facets, sort) and the visible options.',
+        'Determine how refinements take effect (auto-apply, apply button, or required step).',
+        'Determine how to open a listing and reach its primary action (e.g., apply link).',
+        'Determine how apply links can be captured or saved.',
+      ];
+      const { url, task = defaultTask, goals = defaultGoals } = message.payload as StartDiscoveryPayload;
       
       if (!url) {
         return { success: false, error: 'URL is required for discovery' };
       }
       
       // Run discovery
-      startDiscovery({ url, task })
+      startDiscovery({ url, task, goals })
         .then((result) => {
           logger.info('Discovery completed', { 
             success: result.success, 

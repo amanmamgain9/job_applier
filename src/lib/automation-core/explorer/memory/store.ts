@@ -485,4 +485,114 @@ export class MemoryStore {
 
     return result;
   }
+
+  // ============================================
+  // NEW METHODS for Hierarchical Manager/Worker
+  // ============================================
+
+  /**
+   * Initialize a new page (simpler than updateFromClassification)
+   */
+  initializePage(pageId: string, understanding: string, url: string): void {
+    if (!this.pages.has(pageId)) {
+      const node: PageNode = {
+        id: pageId,
+        understanding,
+        rawObservations: [],
+        patterns: [],
+        incomingEdges: [],
+        outgoingEdges: [],
+        visitCount: 1,
+        lastVisitedAt: Date.now(),
+        lastUrl: url,
+      };
+      this.pages.set(pageId, node);
+    }
+    
+    this.previousPageId = this.currentPageId;
+    this.currentPageId = pageId;
+    
+    if (!this.navigationPath.includes(pageId)) {
+      this.navigationPath.push(pageId);
+    }
+  }
+
+  /**
+   * Get patterns for current page
+   */
+  getCurrentPagePatterns(): BehaviorPattern[] {
+    if (!this.currentPageId) return [];
+    const page = this.pages.get(this.currentPageId);
+    return page?.patterns || [];
+  }
+
+  /**
+   * Get observations for current page
+   */
+  getCurrentPageObservations(): string[] {
+    if (!this.currentPageId) return [];
+    const page = this.pages.get(this.currentPageId);
+    return page?.rawObservations || [];
+  }
+
+  /**
+   * Add a simple string observation to current page
+   */
+  addObservation(observation: string): void {
+    if (!this.currentPageId) return;
+    const page = this.pages.get(this.currentPageId);
+    if (page) {
+      page.rawObservations.push(observation);
+    }
+  }
+
+  /**
+   * Confirm a pattern by ID (increment count, mark confirmed if count >= 2)
+   */
+  confirmPattern(patternId: string): void {
+    if (!this.currentPageId) return;
+    const page = this.pages.get(this.currentPageId);
+    if (!page) return;
+    
+    const pattern = page.patterns.find(p => p.id === patternId);
+    if (pattern) {
+      pattern.count++;
+      if (pattern.count >= 2) {
+        pattern.confirmed = true;
+      }
+    }
+  }
+
+  /**
+   * Add or update a pattern
+   */
+  addOrUpdatePattern(pattern: BehaviorPattern): void {
+    if (!this.currentPageId) return;
+    const page = this.pages.get(this.currentPageId);
+    if (!page) return;
+    
+    const existingIndex = page.patterns.findIndex(p => p.id === pattern.id);
+    if (existingIndex >= 0) {
+      // Update existing, preserve firstSeen
+      const existing = page.patterns[existingIndex];
+      page.patterns[existingIndex] = {
+        ...pattern,
+        firstSeen: existing.firstSeen,
+      };
+    } else {
+      // Add new
+      page.patterns.push(pattern);
+    }
+  }
+
+  /**
+   * Remove a pattern by ID
+   */
+  removePattern(patternId: string): void {
+    if (!this.currentPageId) return;
+    const page = this.pages.get(this.currentPageId);
+    if (!page) return;
+    
+    page.patterns = page.patterns.filter(p => p.id !== patternId);
+  }
 }

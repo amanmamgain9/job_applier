@@ -58,6 +58,7 @@ export interface DiscoveryStatePayload {
 export interface StartDiscoveryPayload {
   url: string;
   task?: string;
+  goals?: string[];
   maxJobs?: number;
 }
 

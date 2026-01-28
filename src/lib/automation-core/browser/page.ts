@@ -282,7 +282,7 @@ export class Page {
         fullPage: fullPage,
         encoding: 'base64',
         type: 'jpeg',
-        quality: 80,
+        quality: 50,  // Lower quality for faster Gemini API calls (~360KB → ~150KB)
       });
 
       await this._puppeteerPage.evaluate(() => {

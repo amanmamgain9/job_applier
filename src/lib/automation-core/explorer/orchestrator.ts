@@ -1,573 +1,393 @@
 /**
- * Orchestrator
+ * Orchestrator (Simplified)
  * 
- * Main loop that coordinates agents:
- * - Explorer: Navigates and observes
- * - ChangeAnalyzer: Determines what changed after actions
- * - Consolidator: Groups observations into patterns (LLM-based)
- * - Summarizer: Compresses observations
- * 
- * Handles tool execution, handoffs, and memory updates.
+ * A simple loop that:
+ * 1. Asks Manager what to do
+ * 2. Executes the action
+ * 3. Automatically analyzes what changed
+ * 4. Updates context
+ * 5. Repeats until done
  */
 
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { Page } from '../browser/page';
 import { MemoryStore, ExplorationResult } from './memory';
-import { runExplorer, ExplorerAction } from './agents/explorer';
+import { runManager, ManagerAction, ManagerDecision } from './agents/manager';
+import { runAnalyzer } from './agents/analyzer';
 import { runSummarizer } from './agents/summarizer';
-import { runChangeAnalyzer } from './agents/change-analyzer';
-import { runConsolidator, consolidatorOutputToPatterns } from './agents/consolidator';
 import { domTreeToString } from '../utils/dom-to-text';
 import { ReportService } from '../reporting';
-import { createLogger } from '../utils/logger';
+import { createLogger, setReportSink } from '../utils/logger';
 
 const logger = createLogger('Orchestrator');
+
+// LLM call timeout - disabled (no timeout, let it run)
+// const LLM_TIMEOUT_MS = 60000;
+
+// ============================================================================
+// Types
+// ============================================================================
 
 export interface OrchestratorOptions {
   page: Page;
   task: string;
+  goals?: string[];
   llm: BaseChatModel;
+  apiKey: string;           // For direct Gemini API calls (visual analyzer)
+  model?: string;           // Model name for analyzer
   report?: ReportService;
   maxSteps?: number;
 }
 
 interface ActionResult {
   success: boolean;
-  urlChanged: boolean;
-  newUrl?: string;
-  oldUrl?: string;
-  error?: string;
-  dom?: string;
-  beforeDom?: string;
-  afterDom?: string;
-  actionDescription?: string; // What action was taken (for differ)
+  description: string;
+  newDom: string;
+  newUrl: string;
 }
 
+// ============================================================================b
+// Main Entry Point
+// ============================================================================
+
 export async function runOrchestrator(options: OrchestratorOptions): Promise<ExplorationResult> {
-  const { page, task, llm, report, maxSteps = 20 } = options;
+  const { page, task, goals, llm, apiKey, model, report, maxSteps = 20 } = options;
   
   const memory = new MemoryStore();
-  let previousUrl: string = '';
+  const actionHistory: string[] = [];
   let stepCount = 0;
-  const recentActions: string[] = []; // Track recent actions for context
-  let lastActionResult: string | null = null; // Result of the most recent action - shown prominently to LLM
+
+  // Pipe all logger output to report so it appears in downloadable reports
+  if (report) {
+    setReportSink((msg) => report.logRaw(msg));
+  }
 
   logger.info('Starting orchestrator', { task, maxSteps });
 
   try {
-    // Get initial state
-    report?.startAction('Getting initial page state');
+    // Initialize
     const initialState = await page.getState();
-    const initialDom = domTreeToString(initialState.elementTree, { includeSelectors: true });
-    report?.endAction(true);
-
-    previousUrl = initialState.url;
-
-    // Initial page analysis
-    report?.startAction('Analyzing initial page');
-    const initialAnalysis = await runChangeAnalyzer({
-      llm,
-      action: 'Page loaded',
-      beforeUrl: '',
-      afterUrl: initialState.url,
-      beforeDom: '',
-      afterDom: initialDom,
-      knownPageTypes: [],
-      currentPageType: undefined,
-    });
+    let currentDom = domTreeToString(initialState.elementTree, { includeSelectors: true });
+    let currentUrl = initialState.url;
     
-    // Initialize memory with initial page
-    memory.updateFromClassification({
-      pageId: initialAnalysis.pageType,
-      isNewPage: true,
-      isSamePage: false,
-      understanding: initialAnalysis.pageUnderstanding,
-    }, null);
-    logger.info('Initial page analyzed', { pageType: initialAnalysis.pageType });
-    report?.endAction(true);
+    // Use URL hostname as initial page identifier
+    const pageId = new URL(currentUrl).hostname.replace(/\./g, '_');
+    memory.initializePage(pageId, task, currentUrl);
+    report?.log(`[Start] ${currentUrl}`);
+    
+    // Log sample of DOM text so we can see what the LLM sees
+    logger.info('Initial DOM sample (first 2000 chars)', { 
+      domSample: currentDom.slice(0, 2000) 
+    });
 
-    // Main exploration loop
+    // Main loop
     while (stepCount < maxSteps) {
       stepCount++;
-      logger.info(`Exploration step ${stepCount}/${maxSteps}`);
+      report?.log(`\n[Step ${stepCount}/${maxSteps}]`);
 
-      // Get current state  
-      const currentState = await page.getState();
-      let currentDom = domTreeToString(currentState.elementTree, { includeSelectors: true });
-
-      // Check for action loop - if last 3 actions are identical, force variety
-      const lastActions = recentActions.slice(-3);
-      const isClickLoop = lastActions.length >= 3 && 
-        lastActions.every(a => a === lastActions[0] && a.startsWith('Clicked'));
-      
-      // Check for scroll loop - if last 5 actions are all scrolls
-      const last5Actions = recentActions.slice(-5);
-      const isScrollLoop = last5Actions.length >= 5 &&
-        last5Actions.every(a => a.startsWith('Scrolled'));
-      
-      const isLooping = isClickLoop || isScrollLoop;
-      
-      if (isClickLoop) {
-        report?.log(`[LOOP DETECTED] Same click repeated 3x: "${lastActions[0]}"`);
-        memory.enrichCurrentPage(`WARNING: Action "${lastActions[0]}" was tried 3 times with no effect - this element may not be working or is already selected`);
-      }
-      
-      if (isScrollLoop) {
-        report?.log(`[LOOP DETECTED] Scrolled 5 times in a row - time to try something else`);
-        memory.enrichCurrentPage(`WARNING: You have scrolled 5 times in a row. Stop scrolling and try clicking on elements you can see, or dismiss any open dialogs.`);
+      // Check browser connection
+      if (!page.attached) {
+        report?.log(`[FATAL] Browser connection lost`);
+        return makeErrorResult(memory, 'Browser connection lost - Puppeteer disconnected');
       }
 
-      // Run Consolidator if needed (LLM-based pattern recognition)
-      if (memory.shouldConsolidate()) {
-        report?.startAction('Consolidating patterns');
-        const consolidationInput = memory.getConsolidationInput();
-        
-        try {
-          const consolidationResult = await runConsolidator({
-            llm,
-            input: {
-              rawObservations: consolidationInput.rawObservations,
-              existingPatterns: consolidationInput.existingPatterns,
-              truncatedDom: currentDom.slice(0, 3000),
-            },
-          });
-          
-          // Update memory with consolidated patterns
-          const newPatterns = consolidatorOutputToPatterns(consolidationResult);
-          memory.updatePatternsFromConsolidation(newPatterns);
-          
-          report?.log(`[Consolidation] ${newPatterns.length} patterns identified, ${newPatterns.filter(p => p.confirmed).length} confirmed`);
-          report?.endAction(true);
-        } catch (error) {
-          report?.log(`[Consolidation Error] ${error}`);
-          report?.endAction(false, String(error));
-        }
+      // Get Manager's decision
+      const decision = await getManagerDecision(
+      apiKey, model, task, goals, currentDom, memory, actionHistory, report
+      );
+      
+      if (!decision) {
+        return makeErrorResult(memory, 'Manager failed to make a decision');
       }
 
-      // Run Explorer to decide next action
-      const memorySummary = memory.getSummary();
-      report?.log(`[Memory] Page: ${memory.getCurrentPageId()}, Observations: ${memory.getObservations(memory.getCurrentPageId() || '').length}`);
-      report?.log(`[Memory Summary] ${memorySummary.slice(0, 500).replace(/\n/g, ' | ')}`);
-      
-      // Safety check for undefined DOM
-      if (!currentDom) {
-        report?.log(`[ERROR] currentDom is undefined! Attempting to refresh...`);
-        const refreshedState = await page.getState();
-        currentDom = domTreeToString(refreshedState.elementTree, { includeSelectors: true });
-      }
-      
-      report?.log(`[DOM Length] ${currentDom?.length || 0} chars`);
-      report?.log(`[DOM Preview] ${(currentDom || '').slice(0, 2000).replace(/\n/g, ' | ')}`);
-      
-      // Count confirmed patterns (robust behaviors we've learned)
-      const confirmedPatterns = memory.getConfirmedPatternCount();
-      
-      // Log if we have a pattern warning for the LLM
-      if (lastActionResult && lastActionResult.includes('PATTERN ALREADY CONFIRMED')) {
-        report?.log(`[To LLM] Pattern warning included in prompt`);
-      }
-      
-      report?.startAction('Asking LLM for next action');
-      const decision = await runExplorer({
-        llm,
-        dom: currentDom,
-        memorySummary,
-        task,
-        currentPageId: memory.getCurrentPageId(),
-        lastActionResult, // Show the result of the previous action prominently
-        discoveryCount: confirmedPatterns, // Use confirmed patterns, not raw observations
-        loopWarning: isLooping ? lastActions[0] : undefined,
-        report, // Pass report for prompt logging
-      });
-      report?.endAction(true);
-
-      let action = decision.action;
-      logger.info('Explorer decided', { actionType: action.type });
-
-      // Hard circuit breaker: if same EXACT selector clicked 5+ times, force observe instead
-      if (action.type === 'click') {
-        const clickKey = `Clicked "${action.selector}"`;
-        const sameClickCount = recentActions.filter(a => a.startsWith(clickKey)).length;
-        if (sameClickCount >= 4) {
-          report?.log(`[CIRCUIT BREAKER] Blocked repeat click on "${action.selector}" (${sameClickCount + 1}x). Forcing observe.`);
-          action = { type: 'observe', what: 'page after blocked repeated click' };
-        }
-      }
-      
-      // Hard circuit breaker: if clicking a confirmed pattern too many times AND we have multiple confirmed patterns
-      // Only force done() if we've explored multiple element types, not just one
-      if (action.type === 'click') {
-        const confirmedPattern = memory.getMatchingPattern('click');
-        const confirmedCount = memory.getConfirmedPatternCount();
-        
-        // Only force done() if:
-        // 1. We have at least 2 confirmed patterns (explored multiple element types)
-        // 2. The current pattern has been clicked 4+ times (really overdoing it)
-        if (confirmedPattern && confirmedPattern.confirmed && confirmedPattern.count >= 4 && confirmedCount >= 2) {
-          report?.log(`[CIRCUIT BREAKER] Pattern "${confirmedPattern.targetDescription}" clicked ${confirmedPattern.count}x with ${confirmedCount} confirmed patterns. Forcing done().`);
-          action = { 
-            type: 'done', 
-            understanding: `Exploration complete. Discovered ${confirmedCount} interaction patterns.`,
-            pageType: memory.getCurrentPageId() || 'unknown',
-            keyFindings: memory.getAllPatternDescriptions()
-          };
-        }
-      }
-      
-      // Hard circuit breaker: if 8+ scrolls, force observe instead  
-      if (action.type === 'scroll') {
-        const scrollCount = recentActions.slice(-8).filter(a => a.startsWith('Scrolled')).length;
-        if (scrollCount >= 7) {
-          report?.log(`[CIRCUIT BREAKER] Too many scrolls (${scrollCount + 1}). Forcing observe to reassess.`);
-          action = { type: 'observe', what: 'page after excessive scrolling - look for clickable elements or dialogs to interact with' };
-        }
-      }
-      
-      // Hard circuit breaker: if too many consecutive observes, force done()
-      if (action.type === 'observe') {
-        const last5 = recentActions.slice(-5);
-        const observeCount = last5.filter(a => a.startsWith('Observed')).length;
-        if (observeCount >= 4) {
-          // 4+ observes in last 5 actions means we're hopelessly stuck - force done()
-          report?.log(`[CIRCUIT BREAKER] ${observeCount + 1} observes in last 5 actions. Forcing done() - exploration is stuck.`);
-          action = { 
-            type: 'done', 
-            understanding: `Exploration ended due to repeated observe loops. The page appears to be a job search with listings and apply functionality, but some interactions did not produce visible changes.`,
-            pageType: memory.getCurrentPageId() || 'job_search',
-            keyFindings: memory.getAllPatternDescriptions()
-          };
-        } else if (observeCount >= 2) {
-          report?.log(`[CIRCUIT BREAKER] Too many consecutive observes (${observeCount + 1}). Injecting warning.`);
-          memory.enrichCurrentPage(`WARNING: You have called observe() ${observeCount + 1} times in a row. The DOM is already visible above. Click on an element or scroll to explore further.`);
-        }
+      // Handle done
+      if (decision.action.type === 'done') {
+        report?.log(`[Done] Finishing exploration`);
+        return finishExploration(decision.action, memory, llm, report);
       }
 
-      // Handle the action
-      if (action.type === 'done') {
-        // Run final consolidation before finishing
-        report?.startAction('Final consolidation');
-        const consolidationInput = memory.getConsolidationInput();
-        
-        if (consolidationInput.rawObservations.length > 0 || consolidationInput.pendingObservations.length > 0) {
-          try {
-            const consolidationResult = await runConsolidator({
-              llm,
-              input: {
-                rawObservations: consolidationInput.rawObservations,
-                existingPatterns: consolidationInput.existingPatterns,
-                truncatedDom: currentDom.slice(0, 3000),
-              },
-            });
-            
-            const newPatterns = consolidatorOutputToPatterns(consolidationResult);
-            memory.updatePatternsFromConsolidation(newPatterns);
-            report?.log(`[Final Consolidation] ${newPatterns.length} patterns, ${newPatterns.filter(p => p.confirmed).length} confirmed`);
-            report?.endAction(true);
-          } catch (error) {
-            report?.log(`[Final Consolidation Error] ${error}`);
-            report?.endAction(false, String(error));
-          }
-        } else {
-          report?.endAction(true);
-        }
-        
-        // Exploration complete - summarize all pages
-        logger.info('Exploration complete, summarizing pages');
-        
-        for (const pageId of memory.getPageIds()) {
-          const pageNode = memory.getPage(pageId);
-          if (pageNode && pageNode.rawObservations.length > 0) {
-            report?.startAction(`Summarizing page: ${pageId}`);
-            const summary = await runSummarizer({
-              llm,
-              pageId,
-              observations: pageNode.rawObservations,
-              currentUnderstanding: pageNode.understanding,
-            });
-            memory.updatePageSummary(pageId, summary.summary);
-            report?.endAction(true);
-          }
-        }
-
-        // Add final understanding to current page
-        memory.enrichCurrentPage(action.understanding);
-
-        // Merge LLM-provided keyElements with memory-discovered selectors
-        const discoveredSelectors = memory.getDiscoveredSelectors();
-        const llmKeyElements = action.keyElements || {};
-        
-        // Merge: prefer LLM-provided values, fall back to discovered
-        const mergedKeyElements = {
-          ...discoveredSelectors,
-          ...Object.fromEntries(
-            Object.entries(llmKeyElements).filter(([_, v]) => v !== undefined)
-          ),
-        };
-
-        const phaseOutput = JSON.stringify({
-          understanding: action.understanding,
-          pageType: action.pageType,
-          keyFindings: action.keyFindings,
-          keyElements: mergedKeyElements,
-          pagesExplored: memory.getPageIds(),
-        }, null, 2);
-        report?.addPhaseOutput('exploration', phaseOutput, true, 0);
-
-        return {
-          success: true,
-          pages: memory.getAllPages(),
-          navigationPath: memory.getNavigationPath(),
-          finalUnderstanding: memory.getFinalUnderstanding(),
-          keyElements: mergedKeyElements,
-        };
-      }
-
-      // Execute the action
-      const result = await executeAction(page, action, report);
+      // Execute action and analyze
+      const result = await executeAndAnalyze(
+        page, decision.action, currentDom, currentUrl, memory, apiKey, model, actionHistory, report
+      );
       
-      // Analyze what changed using ChangeAnalyzer
-      let actionDesc: string;
-      let changeAnalysis: Awaited<ReturnType<typeof runChangeAnalyzer>> | null = null;
-      
-      if (result.success && result.beforeDom && result.afterDom) {
-        report?.startAction('Analyzing change');
-        changeAnalysis = await runChangeAnalyzer({
-          llm,
-          action: describeActionSimple(action, result),
-          beforeUrl: result.oldUrl || previousUrl || '',
-          afterUrl: result.newUrl || previousUrl || '',
-          beforeDom: result.beforeDom,
-          afterDom: result.afterDom,
-          knownPageTypes: memory.getPageIds(),
-          currentPageType: memory.getCurrentPageId() || undefined,
-        });
-        report?.endAction(true);
-        
-        // Build rich action description
-        actionDesc = `${describeActionSimple(action, result)} → ${changeAnalysis.description} [${changeAnalysis.changeType}]`;
-        
-        // Only record observations for actions that actually did something
-        // Skip no_change and minor_change - they don't teach us anything useful
-        if (changeAnalysis.changeType !== 'no_change' && changeAnalysis.changeType !== 'minor_change') {
-          memory.addRawObservation({
-            action: action.type,
-            selector: (action as { selector?: string }).selector,
-            elementType: changeAnalysis.elementType,
-            effect: changeAnalysis.description,
-            changeType: changeAnalysis.changeType,
-          });
-          report?.log(`[Observation Added] ${action.type} ${changeAnalysis.elementType} → ${changeAnalysis.description}`);
-        } else {
-          report?.log(`[No Observation] ${action.type} produced ${changeAnalysis.changeType} - skipping`);
-        }
-        
-        // If it's a new page type, update memory
-        if (changeAnalysis.isNewPageType && changeAnalysis.urlChanged) {
-          // Summarize old page first
-          const oldPageId = memory.getCurrentPageId();
-          if (oldPageId) {
-            const oldPage = memory.getPage(oldPageId);
-            if (oldPage && oldPage.rawObservations.length > 0) {
-              const summary = await runSummarizer({
-                llm,
-                pageId: oldPageId,
-                observations: oldPage.rawObservations,
-                currentUnderstanding: oldPage.understanding,
-              });
-              memory.updatePageSummary(oldPageId, summary.summary);
-            }
-          }
-          
-          // Add new page to memory
-          memory.updateFromClassification({
-            pageId: changeAnalysis.pageType,
-            isNewPage: true,
-            isSamePage: false,
-            understanding: changeAnalysis.pageUnderstanding,
-            cameFrom: changeAnalysis.cameFrom,
-            viaAction: changeAnalysis.viaAction,
-          }, previousUrl);
-          
-          report?.log(`[New Page] ${changeAnalysis.pageType}: ${changeAnalysis.pageUnderstanding}`);
-        }
-        
-        // Update tracking
-        previousUrl = result.newUrl || previousUrl;
-      } else if (!result.success && result.error) {
-        actionDesc = `Failed: ${result.error}`;
-        memory.enrichCurrentPage(`Failed: ${result.error}`);
-      } else {
-        actionDesc = describeActionSimple(action, result);
-      }
-      
-      recentActions.push(actionDesc);
-      
-      // Store last action result for prominent display to LLM next iteration
-      // CRITICAL: If this action matched a confirmed pattern (after enrichment), tell the LLM explicitly
-      lastActionResult = actionDesc;
-      
-      if (result.success && action.type === 'click' && changeAnalysis) {
-        const matchedPattern = memory.getMatchingPattern('click', changeAnalysis.elementType);
-        if (matchedPattern && matchedPattern.confirmed) {
-          lastActionResult = `${actionDesc}
-
-⚠️ PATTERN ALREADY CONFIRMED: This action (click ${matchedPattern.targetDescription}) matches behavior you already understand.
-   Pattern: "${matchedPattern.action} ${matchedPattern.targetDescription} → ${matchedPattern.effect}" (seen ${matchedPattern.count}x)
-   
-   You should now try a DIFFERENT element type (filters, apply button, scroll) or call done().`;
-          report?.log(`[PATTERN WARNING] Warned LLM about confirmed pattern: ${matchedPattern.targetDescription}`);
-        }
-      }
+      currentDom = result.newDom;
+      currentUrl = result.newUrl;
     }
 
-    // Max steps reached - run final consolidation
-    report?.startAction('Final consolidation (max steps)');
-    const consolidationInput = memory.getConsolidationInput();
-    
-    if (consolidationInput.rawObservations.length > 0) {
-      try {
-        const consolidationResult = await runConsolidator({
-          llm,
-          input: {
-            rawObservations: consolidationInput.rawObservations,
-            existingPatterns: consolidationInput.existingPatterns,
-          },
-        });
-        
-        const newPatterns = consolidatorOutputToPatterns(consolidationResult);
-        memory.updatePatternsFromConsolidation(newPatterns);
-        report?.endAction(true);
-      } catch (error) {
-        report?.endAction(false, String(error));
-      }
-    } else {
-      report?.endAction(true);
-    }
-    
+    // Max steps reached
     logger.info('Max exploration steps reached');
-    
-    return {
-      success: false,
-      pages: memory.getAllPages(),
-      navigationPath: memory.getNavigationPath(),
-      finalUnderstanding: memory.getFinalUnderstanding(),
-      error: 'Max exploration steps reached',
-    };
+    report?.log(`[Timeout] Max steps reached`);
+    return makeErrorResult(memory, 'Max exploration steps reached');
 
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    logger.error('Orchestrator error', { error: errorMessage });
-    
-    return {
-      success: false,
-      pages: memory.getAllPages(),
-      navigationPath: memory.getNavigationPath(),
-      finalUnderstanding: memory.getFinalUnderstanding(),
-      error: errorMessage,
-    };
+    const errorStack = error instanceof Error ? error.stack : undefined;
+    logger.error('Orchestrator error', { error: errorMessage, stack: errorStack });
+    report?.log(`[FATAL ERROR] ${errorMessage}`);
+    if (errorStack) {
+      report?.log(`[Stack] ${errorStack.split('\n').slice(0, 3).join(' | ')}`);
+    }
+    return makeErrorResult(memory, errorMessage);
+  } finally {
+    // Clear the report sink to prevent memory leaks
+    setReportSink(null);
   }
 }
+
+// ============================================================================
+// Helper: Get Manager Decision
+// ============================================================================
+
+async function getManagerDecision(
+  apiKey: string,
+  model: string | undefined,
+  task: string,
+  goals: string[] | undefined,
+  currentDom: string,
+  memory: MemoryStore,
+  actionHistory: string[],
+  report?: ReportService
+): Promise<ManagerDecision | null> {
+  try {
+    report?.log(`[Thinking...]`);
+    // No timeout - let the LLM take as long as it needs
+    return await runManager({
+      apiKey,
+      model,
+      task,
+      goals,
+      currentDom,
+      memorySummary: memory.getSummary(),
+      actionHistory,
+      confirmedPatternCount: memory.getConfirmedPatternCount(),
+    });
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    report?.log(`[Manager Error] ${errorMsg}`);
+    actionHistory.push(`MANAGER FAILED: ${errorMsg}`);
+    return null;
+  }
+}
+
+// ============================================================================
+// Helper: Execute Action and Analyze
+// ============================================================================
+
+async function executeAndAnalyze(
+  page: Page,
+  action: ManagerAction & { type: 'explore' },
+  _beforeDom: string,  // Kept for future use
+  beforeUrl: string,
+  memory: MemoryStore,
+  apiKey: string,
+  model: string | undefined,
+  actionHistory: string[],
+  report?: ReportService
+): Promise<ActionResult> {
+  // Log action with reason so we know WHY the LLM chose this
+  report?.log(`[Action] ${action.action}${action.target ? ` → ${action.target}` : ''}`);
+  if (action.reason) {
+    report?.log(`[Reason] ${action.reason}`);
+  }
+  
+  // Find context around the selector in the DOM to understand what element this is
+  if (action.target && _beforeDom) {
+    const selectorPattern = action.target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const contextMatch = _beforeDom.match(new RegExp(`.{0,100}${selectorPattern}.{0,200}`, 's'));
+    if (contextMatch) {
+      logger.info('Element context from DOM', { context: contextMatch[0].replace(/\s+/g, ' ').trim() });
+    }
+  }
+
+  // Capture screenshot BEFORE the action
+  let beforeScreenshot: string | null = null;
+  try {
+    beforeScreenshot = await page.takeScreenshot();
+  } catch {
+    logger.warning('Failed to capture before screenshot');
+  }
+
+  // Execute the action
+  const execResult = await executeAction(page, action, report);
+  
+  // Capture screenshot AFTER the action
+  let afterScreenshot: string | null = null;
+  try {
+    afterScreenshot = await page.takeScreenshot();
+  } catch {
+    logger.warning('Failed to capture after screenshot');
+  }
+  
+  // Get new state
+  const afterState = await page.getState();
+  const afterDom = domTreeToString(afterState.elementTree, { includeSelectors: true });
+  const afterUrl = afterState.url;
+
+  // If action failed, just record and return
+  if (!execResult.success) {
+    actionHistory.push(`${execResult.description} → FAILED`);
+    return { success: false, description: execResult.description, newDom: afterDom, newUrl: afterUrl };
+  }
+
+  // Analyze what changed (using visual comparison with native Gemini SDK)
+  await analyzeChanges(
+    memory, apiKey, model, execResult.description, beforeUrl, afterUrl,
+    beforeScreenshot, afterScreenshot, actionHistory, report
+  );
+
+  return { success: true, description: execResult.description, newDom: afterDom, newUrl: afterUrl };
+}
+
+// ============================================================================
+// Helper: Execute Single Action
+// ============================================================================
 
 async function executeAction(
   page: Page,
-  action: ExplorerAction,
+  action: { action: 'click' | 'scroll_down' | 'scroll_up'; target?: string },
   report?: ReportService
-): Promise<ActionResult> {
-  const oldUrl = (await page.getState()).url;
-
-  switch (action.type) {
-    case 'click': {
-      report?.startAction('Tool: click', JSON.stringify({ selector: action.selector, reason: action.reason }));
-      try {
-        // Capture DOM before click
-        const beforeState = await page.getState();
-        const beforeDom = domTreeToString(beforeState.elementTree, { includeSelectors: true });
-        
-        await page.clickSelector(action.selector);
-        // Wait for any navigation or DOM updates
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        
-        // Capture DOM after click
-        const newState = await page.getState();
-        const afterDom = domTreeToString(newState.elementTree, { includeSelectors: true });
-        const urlChanged = newState.url !== oldUrl;
-        
-        report?.endAction(true);
-        return { 
-          success: true, 
-          urlChanged, 
-          newUrl: newState.url, 
-          oldUrl,
-          beforeDom,
-          afterDom,
-          actionDescription: `Clicked "${action.selector}"`,
-        };
-      } catch (error) {
-        const msg = `Element not found or not clickable: ${action.selector}`;
-        report?.endAction(false, msg);
-        return { success: false, urlChanged: false, error: msg };
-      }
-    }
-
-    case 'scroll': {
-      report?.startAction('Tool: scroll', action.direction);
-      try {
-        if (action.direction === 'down') {
-          await page.scrollToNextPage();
-        } else {
-          await page.scrollToPreviousPage();
+): Promise<{ success: boolean; description: string }> {
+  try {
+    let description = '';
+    
+    switch (action.action) {
+      case 'click':
+        if (!action.target) {
+          report?.log(`[Error] Click requires target`);
+          return { success: false, description: 'click (no target)' };
         }
-        report?.endAction(true);
-        return { success: true, urlChanged: false };
-      } catch (error) {
-        const msg = 'Scroll failed';
-        report?.endAction(false, msg);
-        return { success: false, urlChanged: false, error: msg };
-      }
+        await page.clickSelector(action.target);
+        description = `click "${action.target}"`;
+        break;
+        
+      case 'scroll_down':
+        await page.scrollToNextPage();
+        description = 'scroll down';
+        break;
+        
+      case 'scroll_up':
+        await page.scrollToPreviousPage();
+        description = 'scroll up';
+        break;
     }
-
-    case 'type_text': {
-      report?.startAction('Tool: type_text', JSON.stringify({ selector: action.selector, text: action.text }));
-      try {
-        await page.typeSelector(action.selector, action.text);
-        await new Promise(resolve => setTimeout(resolve, 500)); // Wait for any autocomplete/validation
-        report?.endAction(true);
-        return { success: true, urlChanged: false };
-      } catch (error) {
-        const msg = `Input not found: ${action.selector}`;
-        report?.endAction(false, msg);
-        return { success: false, urlChanged: false, error: msg };
-      }
-    }
-
-    case 'observe': {
-      report?.startAction('Tool: observe', action.what);
-      const state = await page.getState();
-      const dom = domTreeToString(state.elementTree, { includeSelectors: true });
-      report?.endAction(true);
-      return { success: true, urlChanged: false, dom };
-    }
-
-    default:
-      return { success: false, urlChanged: false, error: 'Unknown action' };
+    
+    // Wait for page updates
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    return { success: true, description };
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    report?.log(`[Error] ${errorMsg}`);
+    return { success: false, description: action.action };
   }
 }
 
-function describeActionSimple(action: ExplorerAction, result: ActionResult): string {
-  switch (action.type) {
-    case 'click':
-      if (result.urlChanged) {
-        return `Clicked "${action.selector}" → navigated`;
-      }
-      return `Clicked "${action.selector}"`;
-    case 'scroll':
-      return `Scrolled ${action.direction}`;
-    case 'type_text':
-      return `Typed "${action.text}" into ${action.selector}`;
-    case 'observe':
-      // Include what was visible - the next LLM call will see the full DOM anyway
-      return `Observed ${action.what} (DOM refreshed - see CURRENT DOM below for details)`;
-    default:
-      return 'Action performed';
+// ============================================================================
+// Helper: Analyze Changes (Visual using native Gemini SDK)
+// ============================================================================
+
+async function analyzeChanges(
+  memory: MemoryStore,
+  apiKey: string,
+  model: string | undefined,
+  actionDesc: string,
+  beforeUrl: string,
+  afterUrl: string,
+  beforeScreenshot: string | null,
+  afterScreenshot: string | null,
+  actionHistory: string[],
+  report?: ReportService
+): Promise<void> {
+  try {
+    report?.log(`[Analyzing...]`);
+    // No timeout - let the analyzer take as long as it needs
+    const analysis = await runAnalyzer({
+      apiKey,
+      model,
+      input: {
+        action: actionDesc,
+        beforeUrl,
+        afterUrl,
+        beforeScreenshot,
+        afterScreenshot,
+      },
+    });
+    
+    // Simple history entry with the summary
+    const historyEntry = `${actionDesc} → ${analysis.summary}`;
+    actionHistory.push(historyEntry);
+    report?.log(`[Result] ${analysis.summary}`);
+
+    // Persist analysis to memory so it shows in final summaries
+    memory.addObservation(historyEntry);
+    
+    if (analysis.urlChanged) {
+      report?.log(`[Navigation] URL changed`);
+    }
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    report?.log(`[Analyzer Error] ${errorMsg}`);
+    actionHistory.push(`${actionDesc} → ANALYSIS FAILED: ${errorMsg}`);
   }
+}
+
+// ============================================================================
+// Helper: Finish Exploration
+// ============================================================================
+
+async function finishExploration(
+  action: { understanding: string; keyElements: Record<string, string | string[]> },
+  memory: MemoryStore,
+  llm: BaseChatModel,
+  report?: ReportService
+): Promise<ExplorationResult> {
+  // Final summarization for all pages
+  for (const pageId of memory.getPageIds()) {
+    const pageNode = memory.getPage(pageId);
+    if (pageNode && pageNode.rawObservations.length > 0) {
+      const summary = await runSummarizer({
+        llm,
+        pageId,
+        observations: pageNode.rawObservations,
+        currentUnderstanding: pageNode.understanding,
+      });
+      memory.updatePageSummary(pageId, summary.summary);
+    }
+  }
+  
+  const discoveredSelectors = memory.getDiscoveredSelectors();
+  const mergedKeyElements = { ...discoveredSelectors, ...action.keyElements };
+  
+  const result: ExplorationResult = {
+    success: true,
+    pages: memory.getAllPages(),
+    navigationPath: memory.getNavigationPath(),
+    finalUnderstanding: action.understanding,
+    keyElements: mergedKeyElements,
+  };
+  
+  const phaseOutput = JSON.stringify({
+    understanding: action.understanding,
+    keyElements: mergedKeyElements,
+    pagesExplored: memory.getPageIds(),
+  }, null, 2);
+  report?.addPhaseOutput('exploration', phaseOutput, true, 0);
+  
+  return result;
+}
+
+// ============================================================================
+// Helper: Make Error Result
+// ============================================================================
+
+function makeErrorResult(memory: MemoryStore, error: string): ExplorationResult {
+  return {
+    success: false,
+    pages: memory.getAllPages(),
+    navigationPath: memory.getNavigationPath(),
+    finalUnderstanding: memory.getFinalUnderstanding(),
+    keyElements: memory.getDiscoveredSelectors(),
+    error,
+  };
 }

@@ -1,5 +1,8 @@
 /**
  * Simple logger for the automation-core library
+ * 
+ * All logs are also piped to the active report (if set) so they appear
+ * in the downloadable session report.
  */
 
 export type LogLevel = 'debug' | 'info' | 'warning' | 'error';
@@ -24,6 +27,26 @@ export function isDebugEnabled(): boolean {
   return debugEnabled;
 }
 
+// Global report sink - when set, all logs also go to the report
+type ReportSink = (message: string) => void;
+let activeReportSink: ReportSink | null = null;
+
+export function setReportSink(sink: ReportSink | null): void {
+  activeReportSink = sink;
+}
+
+function formatArgs(args: unknown[]): string {
+  return args.map(arg => {
+    if (typeof arg === 'string') return arg;
+    if (arg instanceof Error) return `${arg.name}: ${arg.message}`;
+    try {
+      return JSON.stringify(arg);
+    } catch {
+      return String(arg);
+    }
+  }).join(' ');
+}
+
 export function createLogger(namespace: string): Logger {
   const prefix = `[${namespace}]`;
 
@@ -35,16 +58,35 @@ export function createLogger(namespace: string): Logger {
   const boundGroup = console.group.bind(console);
   const boundGroupEnd = console.groupEnd.bind(console);
 
+  const pipeToReport = (level: string, args: unknown[]) => {
+    if (activeReportSink) {
+      activeReportSink(`${prefix} [${level}] ${formatArgs(args)}`);
+    }
+  };
+
   return {
     debug: (...args: unknown[]) => {
       if (debugEnabled) {
         boundDebug(...args);
+        pipeToReport('DEBUG', args);
       }
     },
-    info: boundInfo,
-    warning: boundWarn,
-    error: boundError,
-    group: (label: string) => boundGroup(`${prefix} ${label}`),
+    info: (...args: unknown[]) => {
+      boundInfo(...args);
+      pipeToReport('INFO', args);
+    },
+    warning: (...args: unknown[]) => {
+      boundWarn(...args);
+      pipeToReport('WARN', args);
+    },
+    error: (...args: unknown[]) => {
+      boundError(...args);
+      pipeToReport('ERROR', args);
+    },
+    group: (label: string) => {
+      boundGroup(`${prefix} ${label}`);
+      pipeToReport('GROUP', [label]);
+    },
     groupEnd: boundGroupEnd,
   };
 }

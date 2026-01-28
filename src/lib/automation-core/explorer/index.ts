@@ -1,11 +1,14 @@
 // Main orchestrator
 export { runOrchestrator, type OrchestratorOptions } from './orchestrator';
 
-// Agents
-export { runChangeAnalyzer, type ChangeAnalyzerOptions, type ChangeAnalysis } from './agents/change-analyzer';
-export { runExplorer, type ExplorerOptions, type ExplorerAction, type ExplorerDecision } from './agents/explorer';
+// Manager (Hierarchical coordinator)
+export { runManager, type ManagerOptions, type ManagerAction, type ManagerDecision } from './agents/manager';
+
+// Analyzer (hash-based diff + LLM summary)
+export { runAnalyzer, type AnalyzerOptions, type AnalyzerInput, type AnalyzerOutput } from './agents/analyzer';
+
+// Summarizer
 export { runSummarizer, type SummarizerOptions, type SummarizerResult } from './agents/summarizer';
-export { runConsolidator, type ConsolidatorOptions, type ConsolidatorOutput } from './agents/consolidator';
 
 // Memory
 export { MemoryStore } from './memory/store';

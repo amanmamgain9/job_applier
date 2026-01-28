@@ -35,6 +35,7 @@ export interface DiscoveryState {
 export interface DiscoveryOptions {
   url: string;
   task: string;
+  goals?: string[];
 }
 
 export interface DiscoveryResult {
@@ -111,10 +112,24 @@ export function getCurrentReport(): SessionReport | null {
 // ============================================================================
 
 export async function startDiscovery(options: DiscoveryOptions): Promise<DiscoveryResult> {
-  const { url, task } = options;
+  const { url, task, goals } = options;
   
   console.log('[Discovery] Starting for:', url);
   console.log('[Discovery] Task:', task);
+  if (goals && goals.length > 0) {
+    console.log('[Discovery] Goals:', goals);
+  }
+  
+  // Keep service worker alive during long operations
+  // Chrome suspends service workers after ~30s of inactivity
+  // Using chrome API calls to keep it active - ping every 5 seconds to be safe
+  const keepAliveInterval = setInterval(async () => {
+    try {
+      await chrome.runtime.getPlatformInfo();
+    } catch {
+      // Ignore errors
+    }
+  }, 5000); // Ping every 5 seconds
   
   // Reset state
   updateState({ 
@@ -146,9 +161,10 @@ export async function startDiscovery(options: DiscoveryOptions): Promise<Discove
     report.endAction(true);
     
     report.startAction('Creating LLM');
+    const modelName = 'gemini-3-flash-preview';  // Gemini 3 Flash - supports vision/images per docs
     const llm = createChatModel({
       provider: 'gemini',
-      model: 'gemini-3-flash-preview',  // Latest Gemini 3 Flash - best for reasoning
+      model: modelName,
       apiKey,
     });
     report.endAction(true);
@@ -178,7 +194,10 @@ export async function startDiscovery(options: DiscoveryOptions): Promise<Discove
     const exploration = await runOrchestrator({
       page,
       task,
+      goals,
       llm,
+      apiKey,
+      model: modelName,
       report,
       maxSteps: 25, // Max exploration actions
     });
@@ -215,6 +234,9 @@ export async function startDiscovery(options: DiscoveryOptions): Promise<Discove
       error: errorMessage,
     };
   } finally {
+    // Stop keep-alive
+    clearInterval(keepAliveInterval);
+    
     // Cleanup
     if (browserContext) {
       await browserContext.cleanup();

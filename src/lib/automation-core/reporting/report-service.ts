@@ -114,6 +114,12 @@ export class ReportService {
     this.stream();
   }
 
+  /** Log a pre-formatted message (no timestamp added) - used by logger sink */
+  logRaw(message: string): void {
+    this.report.logs.push(message);
+    this.stream();
+  }
+
   // ---- Steps ----
   
   startStep(goal: string): void {
