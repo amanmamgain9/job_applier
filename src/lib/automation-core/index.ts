@@ -1,20 +1,52 @@
 /**
  * automation-core - Browser automation library for Chrome Extensions
  * 
- * Main entry: runOrchestrator() - Multi-agent exploration with:
- * - Explorer Agent: Navigates and observes
- * - ChangeAnalyzer Agent: Classifies DOM changes and page types
- * - Consolidator Agent: Groups behavioral patterns
- * - Summarizer Agent: Compresses understanding
+ * Main entry: Manager.run() or runDiscoveryLoop()
  * 
- * See explorer/ARCHITECTURE.md for full design.
+ * See explorer/GOALS_AND_MEMORY.md for full design.
  */
 
-// Orchestrator - main entry point for exploration
+// Manager - top-level coordinator
 export {
-  runOrchestrator,
-  type OrchestratorOptions,
-} from './explorer/orchestrator';
+  Manager,
+  runManager,
+  type ManagerOptions,
+  type ManagerMemory,
+  type ManagerResult,
+} from './explorer/manager';
+
+// Discovery Loop - Phase 1
+export {
+  runDiscoveryLoop,
+  type DiscoveryContext,
+} from './explorer/discovery-loop';
+
+// Discovery Agent (per-step decision maker)
+export {
+  runDiscoveryAgent,
+  type DiscoveryAction,
+  type DiscoveryDecision,
+  type DiscoveryAgentContext,
+} from './explorer/agents/discovery-agent';
+
+// Discovery Sub-Agents
+export {
+  runDiscoveryAnalyzer,
+  type DiscoveryAnalyzerContext,
+  type DiscoveryAnalyzerResult,
+} from './explorer/agents/discovery-analyzer';
+
+export {
+  runDiscoverySummarizer,
+  type DiscoverySummarizerContext,
+  type DiscoverySummarizerResult,
+} from './explorer/agents/discovery-summarizer';
+
+// Handoff Contracts
+export {
+  type HandoffInput,
+  type HandoffOutput,
+} from './explorer/types/handoff';
 
 // Exploration types
 export {

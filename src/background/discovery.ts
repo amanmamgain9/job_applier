@@ -1,13 +1,13 @@
 /**
  * Discovery - Entry point for page analysis
  * 
- * Receives user request, calls automation-core orchestrator, returns results.
+ * Receives user request, calls automation-core discovery loop, returns results.
  * Uses ReportService from automation-core for streaming reports.
  */
 
 import { 
   BrowserContext, 
-  runOrchestrator,
+  runDiscoveryLoop,
   createChatModel,
   ReportService,
   type ExplorationResult,
@@ -187,22 +187,33 @@ export async function startDiscovery(options: DiscoveryOptions): Promise<Discove
     report.endAction(true);
     report.endStep(true);
     
-    // Step 3: Run orchestrator (multi-agent exploration)
+    // Step 3: Run discovery loop (multi-agent exploration)
     report.startStep('Exploring page with LLM agents');
     updateState({ currentStep: 3 });
     
-    const exploration = await runOrchestrator({
-      page,
-      task,
-      goals,
-      llm,
-      apiKey,
-      model: modelName,
-      report,
-      maxSteps: 25, // Max exploration actions
+    const discoveryResult = await runDiscoveryLoop({
+      goal: task,
+      context: {
+        page,
+        goals,
+        llm,
+        apiKey,
+        model: modelName,
+        report,
+        maxSteps: 25, // Max exploration actions
+      },
     });
     
-    report.endStep(exploration.success, exploration.error);
+    // Extract exploration result from handoff output
+    const exploration: ExplorationResult = discoveryResult.result || {
+      success: false,
+      pages: new Map(),
+      navigationPath: [],
+      finalUnderstanding: '',
+      error: discoveryResult.reason || 'Discovery failed',
+    };
+    
+    report.endStep(discoveryResult.goalCompleted, discoveryResult.reason);
     
     console.log('[Discovery] Exploration complete:', {
       pagesFound: exploration.pages.size,

@@ -259,7 +259,9 @@ const recipe = await manager.run(task, goals);
 
 ## Completed
 
-All refactoring steps completed. New files created:
+All refactoring steps completed.
+
+**New files:**
 - `manager.ts` — Manager class
 - `discovery-loop.ts` — Discovery loop with handoff contracts
 - `agents/discovery-agent.ts` — Per-step decision maker
@@ -267,9 +269,14 @@ All refactoring steps completed. New files created:
 - `agents/discovery-summarizer.ts` — Observation consolidation
 - `types/handoff.ts` — Handoff contracts
 
-Legacy files kept for backwards compatibility:
-- `orchestrator.ts` — exports still work
-- `agents/manager.ts` — old runManager
-- `agents/analyzer.ts` — old runAnalyzer
-- `agents/summarizer.ts` — old runSummarizer
+**Deleted files:**
+- `orchestrator.ts` — replaced by `discovery-loop.ts`
+- `agents/manager.ts` — replaced by `agents/discovery-agent.ts`
+- `agents/analyzer.ts` — replaced by `agents/discovery-analyzer.ts`
+- `agents/summarizer.ts` — replaced by `agents/discovery-summarizer.ts`
+- `agents/discoverer.ts` — inlined into `agents/discovery-agent.ts`
+
+**Updated consumers:**
+- `background/discovery.ts` — uses `runDiscoveryLoop` instead of `runOrchestrator`
+- `automation-core/index.ts` — exports new structure
 
