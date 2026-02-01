@@ -1,26 +1,25 @@
 /**
- * Orchestrator (Simplified)
+ * Discovery Loop
  * 
- * A simple loop that:
- * 1. Asks Manager what to do
- * 2. Executes the action
- * 3. Automatically analyzes what changed
- * 4. Updates context
- * 5. Repeats until done
+ * Phase 1 of the Recipe Generation System.
+ * Explores a webpage to learn how to complete a task.
+ * 
+ * Called by Manager, returns ExplorationResult via handoff contract.
  */
 
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { Page } from '../browser/page';
 import { MemoryStore, ExplorationResult } from './memory';
-import { runManager, ManagerAction, ManagerDecision } from './agents/manager';
-import { runAnalyzer } from './agents/analyzer';
-import { runSummarizer } from './agents/summarizer';
+import { runDiscoveryAgent, DiscoveryAction, DiscoveryDecision } from './agents/discovery-agent';
+import { runDiscoveryAnalyzer } from './agents/discovery-analyzer';
+import { runDiscoverySummarizer } from './agents/discovery-summarizer';
 import { domTreeToString } from '../utils/dom-to-text';
 import { ReportService } from '../reporting';
 import { createLogger, setReportSink } from '../utils/logger';
 import { ClassifierResult } from './memory/types';
+import { HandoffInput, HandoffOutput } from './types/handoff';
 
-const logger = createLogger('Orchestrator');
+const logger = createLogger('DiscoveryLoop');
 
 function buildPageId(url: string): string {
   try {
@@ -32,20 +31,16 @@ function buildPageId(url: string): string {
   }
 }
 
-// LLM call timeout - disabled (no timeout, let it run)
-// const LLM_TIMEOUT_MS = 60000;
-
 // ============================================================================
 // Types
 // ============================================================================
 
-export interface OrchestratorOptions {
+export interface DiscoveryContext {
   page: Page;
-  task: string;
   goals?: string[];
   llm: BaseChatModel;
-  apiKey: string;           // For direct Gemini API calls (visual analyzer)
-  model?: string;           // Model name for analyzer
+  apiKey: string;
+  model?: string;
   report?: ReportService;
   maxSteps?: number;
 }
@@ -57,12 +52,23 @@ interface ActionResult {
   newUrl: string;
 }
 
-// ============================================================================b
+// ============================================================================
 // Main Entry Point
 // ============================================================================
 
-export async function runOrchestrator(options: OrchestratorOptions): Promise<ExplorationResult> {
-  const { page, task, goals, llm, apiKey, model, report, maxSteps = 20 } = options;
+export async function runDiscoveryLoop(
+  input: HandoffInput<DiscoveryContext>
+): Promise<HandoffOutput<ExplorationResult>> {
+  const { goal, context } = input;
+  
+  if (!context) {
+    return {
+      goalCompleted: false,
+      reason: 'No context provided to discovery loop',
+    };
+  }
+  
+  const { page, goals, llm, apiKey, model, report, maxSteps = 20 } = context;
   
   const memory = new MemoryStore();
   const actionHistory: string[] = [];
@@ -73,7 +79,7 @@ export async function runOrchestrator(options: OrchestratorOptions): Promise<Exp
     setReportSink((msg) => report.logRaw(msg));
   }
 
-  logger.info('Starting orchestrator', { task, maxSteps });
+  logger.info('Starting discovery loop', { goal, maxSteps });
 
   try {
     // Initialize
@@ -83,7 +89,7 @@ export async function runOrchestrator(options: OrchestratorOptions): Promise<Exp
     
     // Use URL hostname as initial page identifier
     const pageId = new URL(currentUrl).hostname.replace(/\./g, '_');
-    memory.initializePage(pageId, task, currentUrl);
+    memory.initializePage(pageId, goal, currentUrl);
     report?.log(`[Start] ${currentUrl}`);
     
     // Log sample of DOM text so we can see what the LLM sees
@@ -99,47 +105,67 @@ export async function runOrchestrator(options: OrchestratorOptions): Promise<Exp
       // Check browser connection
       if (!page.attached) {
         report?.log(`[FATAL] Browser connection lost`);
-        return makeErrorResult(memory, 'Browser connection lost - Puppeteer disconnected');
+        return {
+          goalCompleted: false,
+          result: makeErrorResult(memory, 'Browser connection lost - Puppeteer disconnected'),
+          reason: 'Browser connection lost',
+        };
       }
 
-      // Get Manager's decision
-      const decision = await getManagerDecision(
-      apiKey, model, task, goals, currentDom, memory, actionHistory, report
+      // Get Discovery Agent's decision
+      const decision = await getDiscoveryDecision(
+        apiKey, model, goal, goals, currentDom, memory, actionHistory, report
       );
       
       if (!decision) {
-        return makeErrorResult(memory, 'Manager failed to make a decision');
+        return {
+          goalCompleted: false,
+          result: makeErrorResult(memory, 'Discovery agent failed to make a decision'),
+          reason: 'Discovery agent failed',
+        };
       }
 
       // Handle done
       if (decision.action.type === 'done') {
         report?.log(`[Done] Finishing exploration`);
-        return finishExploration(decision.action, memory, llm, report);
+        const result = await finishExploration(decision.action, memory, llm, report);
+        return {
+          goalCompleted: true,
+          result,
+        };
       }
 
       // Execute action and analyze
-      const result = await executeAndAnalyze(
+      const actionResult = await executeAndAnalyze(
         page, decision.action, currentDom, currentUrl, memory, apiKey, model, actionHistory, report
       );
       
-      currentDom = result.newDom;
-      currentUrl = result.newUrl;
+      currentDom = actionResult.newDom;
+      currentUrl = actionResult.newUrl;
     }
 
     // Max steps reached
     logger.info('Max exploration steps reached');
     report?.log(`[Timeout] Max steps reached`);
-    return makeErrorResult(memory, 'Max exploration steps reached');
+    return {
+      goalCompleted: false,
+      result: makeErrorResult(memory, 'Max exploration steps reached'),
+      reason: 'Max steps reached',
+    };
 
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     const errorStack = error instanceof Error ? error.stack : undefined;
-    logger.error('Orchestrator error', { error: errorMessage, stack: errorStack });
+    logger.error('Discovery loop error', { error: errorMessage, stack: errorStack });
     report?.log(`[FATAL ERROR] ${errorMessage}`);
     if (errorStack) {
       report?.log(`[Stack] ${errorStack.split('\n').slice(0, 3).join(' | ')}`);
     }
-    return makeErrorResult(memory, errorMessage);
+    return {
+      goalCompleted: false,
+      result: makeErrorResult(memory, errorMessage),
+      reason: errorMessage,
+    };
   } finally {
     // Clear the report sink to prevent memory leaks
     setReportSink(null);
@@ -147,10 +173,10 @@ export async function runOrchestrator(options: OrchestratorOptions): Promise<Exp
 }
 
 // ============================================================================
-// Helper: Get Manager Decision
+// Helper: Get Discovery Agent Decision
 // ============================================================================
 
-async function getManagerDecision(
+async function getDiscoveryDecision(
   apiKey: string,
   model: string | undefined,
   task: string,
@@ -159,24 +185,34 @@ async function getManagerDecision(
   memory: MemoryStore,
   actionHistory: string[],
   report?: ReportService
-): Promise<ManagerDecision | null> {
+): Promise<DiscoveryDecision | null> {
   try {
     report?.log(`[Thinking...]`);
-    // No timeout - let the LLM take as long as it needs
-    return await runManager({
-      apiKey,
-      model,
-      task,
-      goals,
-      currentDom,
-      memorySummary: memory.getSummary(),
-      actionHistory,
-      confirmedPatternCount: memory.getConfirmedPatternCount(),
+    const result = await runDiscoveryAgent({
+      goal: `Decide next action to: ${task}`,
+      context: {
+        apiKey,
+        model,
+        task,
+        goals,
+        currentDom,
+        memorySummary: memory.getSummary(),
+        actionHistory,
+        confirmedPatternCount: memory.getConfirmedPatternCount(),
+      },
     });
+    
+    if (!result.goalCompleted || !result.result) {
+      report?.log(`[Discovery Agent Error] ${result.reason || 'No decision'}`);
+      actionHistory.push(`DISCOVERY AGENT FAILED: ${result.reason || 'unknown'}`);
+      return null;
+    }
+    
+    return result.result;
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
-    report?.log(`[Manager Error] ${errorMsg}`);
-    actionHistory.push(`MANAGER FAILED: ${errorMsg}`);
+    report?.log(`[Discovery Agent Error] ${errorMsg}`);
+    actionHistory.push(`DISCOVERY AGENT FAILED: ${errorMsg}`);
     return null;
   }
 }
@@ -187,8 +223,8 @@ async function getManagerDecision(
 
 async function executeAndAnalyze(
   page: Page,
-  action: ManagerAction & { type: 'explore' },
-  _beforeDom: string,  // Kept for future use
+  action: DiscoveryAction & { type: 'explore' },
+  _beforeDom: string,
   beforeUrl: string,
   memory: MemoryStore,
   apiKey: string,
@@ -196,13 +232,13 @@ async function executeAndAnalyze(
   actionHistory: string[],
   report?: ReportService
 ): Promise<ActionResult> {
-  // Log action with reason so we know WHY the LLM chose this
+  // Log action with reason
   report?.log(`[Action] ${action.action}${action.target ? ` → ${action.target}` : ''}`);
   if (action.reason) {
     report?.log(`[Reason] ${action.reason}`);
   }
   
-  // Find context around the selector in the DOM to understand what element this is
+  // Find context around the selector in the DOM
   if (action.target && _beforeDom) {
     const selectorPattern = action.target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const contextMatch = _beforeDom.match(new RegExp(`.{0,100}${selectorPattern}.{0,200}`, 's'));
@@ -241,7 +277,7 @@ async function executeAndAnalyze(
     return { success: false, description: execResult.description, newDom: afterDom, newUrl: afterUrl };
   }
 
-  // Analyze what changed (using visual comparison with native Gemini SDK)
+  // Analyze what changed
   await analyzeChanges(
     memory, apiKey, model, execResult.description, beforeUrl, afterUrl,
     beforeScreenshot, afterScreenshot, actionHistory, report
@@ -295,7 +331,7 @@ async function executeAction(
 }
 
 // ============================================================================
-// Helper: Analyze Changes (Visual using native Gemini SDK)
+// Helper: Analyze Changes
 // ============================================================================
 
 async function analyzeChanges(
@@ -312,11 +348,12 @@ async function analyzeChanges(
 ): Promise<void> {
   try {
     report?.log(`[Analyzing...]`);
-    // No timeout - let the analyzer take as long as it needs
-    const analysis = await runAnalyzer({
-      apiKey,
-      model,
-      input: {
+    
+    const analyzerResult = await runDiscoveryAnalyzer({
+      goal: `Describe what changed after: ${actionDesc}`,
+      context: {
+        apiKey,
+        model,
         action: actionDesc,
         beforeUrl,
         afterUrl,
@@ -325,12 +362,21 @@ async function analyzeChanges(
       },
     });
     
+    if (!analyzerResult.goalCompleted || !analyzerResult.result) {
+      const errorMsg = analyzerResult.reason || 'Analysis failed';
+      report?.log(`[Analyzer Error] ${errorMsg}`);
+      actionHistory.push(`${actionDesc} → ANALYSIS FAILED: ${errorMsg}`);
+      return;
+    }
+    
+    const analysis = analyzerResult.result;
+    
     // Simple history entry with the summary
     const historyEntry = `${actionDesc} → ${analysis.summary}`;
     actionHistory.push(historyEntry);
     report?.log(`[Result] ${analysis.summary}`);
 
-    // Persist analysis to memory so it shows in final summaries
+    // Persist analysis to memory
     memory.addObservation(historyEntry);
     
     if (analysis.urlChanged) {
@@ -345,7 +391,6 @@ async function analyzeChanges(
         cameFrom: previousPageId,
         viaAction: actionDesc,
       };
-      // Wire up page transitions on URL changes
       memory.updateFromClassification(classification, afterUrl);
     }
   } catch (error) {
@@ -369,13 +414,19 @@ async function finishExploration(
   for (const pageId of memory.getPageIds()) {
     const pageNode = memory.getPage(pageId);
     if (pageNode && pageNode.rawObservations.length > 0) {
-      const summary = await runSummarizer({
-        llm,
-        pageId,
-        observations: pageNode.rawObservations,
-        currentUnderstanding: pageNode.understanding,
+      const summarizerResult = await runDiscoverySummarizer({
+        goal: `Consolidate observations for page: ${pageId}`,
+        context: {
+          llm,
+          pageId,
+          observations: pageNode.rawObservations,
+          currentUnderstanding: pageNode.understanding,
+        },
       });
-      memory.updatePageSummary(pageId, summary.summary);
+      
+      if (summarizerResult.goalCompleted && summarizerResult.result) {
+        memory.updatePageSummary(pageId, summarizerResult.result.summary);
+      }
     }
   }
   
@@ -414,3 +465,5 @@ function makeErrorResult(memory: MemoryStore, error: string): ExplorationResult 
     error,
   };
 }
+
+

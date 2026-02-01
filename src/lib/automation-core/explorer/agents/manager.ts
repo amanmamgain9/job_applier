@@ -5,7 +5,17 @@
  * Uses Gemini's function calling with minimal thinking for speed.
  */
 
-import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
+import {
+  GoogleGenerativeAI,
+  FunctionCallingMode,
+  SchemaType,
+  type EnumStringSchema,
+  type SimpleStringSchema,
+  type FunctionDeclaration,
+  type FunctionDeclarationSchema,
+  type FunctionDeclarationsTool,
+} from '@google/generative-ai';
+import { runDiscoverer } from './discoverer';
 import { createLogger } from '../../utils/logger';
 
 const logger = createLogger('Manager');
@@ -48,51 +58,73 @@ export type ManagerAction =
   | { type: 'explore'; action: 'click' | 'scroll_down' | 'scroll_up'; target?: string; reason: string }
   | { type: 'done'; understanding: string; keyElements: Record<string, string | string[]> };
 
+const actionSchema = {
+  type: SchemaType.STRING,
+  format: 'enum',
+  enum: ['click', 'scroll_down', 'scroll_up'],
+  description: 'What action to take. Use click for interactive elements, scroll to see more content.',
+} satisfies EnumStringSchema;
+
+const targetSchema = {
+  type: SchemaType.STRING,
+  description: 'CSS selector for click - copy EXACTLY from [CLICK: "..."] in the DOM. Not needed for scroll.',
+} satisfies SimpleStringSchema;
+
+const reasonSchema = {
+  type: SchemaType.STRING,
+  description: 'Why you are taking this action',
+} satisfies SimpleStringSchema;
+
+const exploreParameters: FunctionDeclarationSchema = {
+  type: SchemaType.OBJECT,
+  properties: {
+    action: actionSchema,
+    target: targetSchema,
+    reason: reasonSchema,
+  },
+  required: ['action', 'reason'],
+};
+
+const understandingSchema = {
+  type: SchemaType.STRING,
+  description: 'How the page works and how to complete the task',
+} satisfies SimpleStringSchema;
+
+const keyElementsSchema = {
+  type: SchemaType.OBJECT,
+  description: 'Important selectors discovered (use meaningful keys)',
+  properties: {
+    example_key: {
+      type: SchemaType.STRING,
+      description: 'Example key for a discovered selector',
+    },
+  },
+} satisfies FunctionDeclarationSchema['properties'][string];
+
+const doneParameters: FunctionDeclarationSchema = {
+  type: SchemaType.OBJECT,
+  properties: {
+    understanding: understandingSchema,
+    key_elements: keyElementsSchema,
+  },
+  required: ['understanding', 'key_elements'],
+};
+
+const exploreDeclaration: FunctionDeclaration = {
+  name: 'explore',
+  description: 'Take an action on the page. After this, the system automatically analyzes what changed.',
+  parameters: exploreParameters,
+};
+
+const doneDeclaration: FunctionDeclaration = {
+  name: 'done',
+  description: 'Finish exploration. Call when you understand the page workflows needed for the task.',
+  parameters: doneParameters,
+};
+
 // Tool definitions for Gemini native SDK
-const managerTools = [{
-  functionDeclarations: [
-    {
-      name: 'explore',
-      description: 'Take an action on the page. After this, the system automatically analyzes what changed.',
-      parameters: {
-        type: SchemaType.OBJECT,
-        properties: {
-          action: {
-            type: SchemaType.STRING,
-            enum: ['click', 'scroll_down', 'scroll_up'],
-            description: 'What action to take. Use click for interactive elements, scroll to see more content.',
-          },
-          target: {
-            type: SchemaType.STRING,
-            description: 'CSS selector for click - copy EXACTLY from [CLICK: "..."] in the DOM. Not needed for scroll.',
-          },
-          reason: {
-            type: SchemaType.STRING,
-            description: 'Why you are taking this action',
-          },
-        },
-        required: ['action', 'reason'],
-      },
-    },
-    {
-      name: 'done',
-      description: 'Finish exploration. Call when you understand the page workflows needed for the task.',
-      parameters: {
-        type: SchemaType.OBJECT,
-        properties: {
-          understanding: {
-            type: SchemaType.STRING,
-            description: 'How the page works and how to complete the task',
-          },
-          key_elements: {
-            type: SchemaType.OBJECT,
-            description: 'Important selectors discovered (use meaningful keys)',
-          },
-        },
-        required: ['understanding', 'key_elements'],
-      },
-    },
-  ],
+const managerTools: FunctionDeclarationsTool[] = [{
+  functionDeclarations: [exploreDeclaration, doneDeclaration],
 }];
 
 export interface ManagerOptions {
@@ -100,6 +132,7 @@ export interface ManagerOptions {
   model?: string;
   task: string;
   goals?: string[];
+  discoverySummary?: string;
   currentDom: string;
   memorySummary: string;
   actionHistory: string[];
@@ -111,7 +144,7 @@ export interface ManagerDecision {
 }
 
 function buildPrompt(options: ManagerOptions): string {
-  const { task, goals, currentDom, memorySummary, actionHistory, confirmedPatternCount } = options;
+  const { task, goals, discoverySummary, currentDom, memorySummary, actionHistory, confirmedPatternCount } = options;
   
   logger.info('buildPrompt inputs', {
     hasTask: !!task,
@@ -143,6 +176,9 @@ function buildPrompt(options: ManagerOptions): string {
 GOALS:
 ${goalsStr}
 
+DISCOVERY SUMMARY:
+${discoverySummary || '(no discovery yet)'}
+
 ${memorySummary || '(no memory yet)'}
 
 RECENT ACTIONS:
@@ -156,7 +192,7 @@ What's your next move? Call explore() or done().`;
 }
 
 export async function runManager(options: ManagerOptions): Promise<ManagerDecision> {
-  const { apiKey, model = 'gemini-3-flash-preview', task, currentDom, actionHistory } = options;
+  const { apiKey, model = 'gemini-3-flash-preview', task, goals, currentDom, actionHistory, memorySummary } = options;
   
   logger.info('runManager called', {
     hasApiKey: !!apiKey,
@@ -176,13 +212,25 @@ export async function runManager(options: ManagerOptions): Promise<ManagerDecisi
     tools: managerTools,
     toolConfig: {
       functionCallingConfig: {
-        mode: 'ANY',
+        mode: FunctionCallingMode.ANY,
         allowedFunctionNames: ['explore', 'done'],
       },
     },
   });
   
-  const prompt = buildPrompt(options);
+  const discoverySummary = await runDiscoverer({
+    apiKey,
+    model,
+    task,
+    goals,
+    memorySummary,
+    actionHistory,
+  });
+
+  const prompt = buildPrompt({
+    ...options,
+    discoverySummary,
+  });
   logger.info('Prompt built', { promptLength: prompt.length });
   
   logger.info('Invoking Gemini with function calling...');
@@ -223,27 +271,28 @@ export async function runManager(options: ManagerOptions): Promise<ManagerDecisi
   return { action };
 }
 
-function parseToolCall(functionCall: { name: string; args: Record<string, unknown> }): ManagerAction {
+function parseToolCall(functionCall: { name: string; args: object }): ManagerAction {
   logger.info('parseToolCall', { name: functionCall.name, args: functionCall.args });
   
   switch (functionCall.name) {
     case 'explore': {
-      const action = functionCall.args.action as string;
+      const args = functionCall.args as Record<string, unknown>;
+      const action = args.action as string;
       if (!['click', 'scroll_down', 'scroll_up'].includes(action)) {
         throw new Error(`Invalid action "${action}" - must be click, scroll_down, or scroll_up`);
       }
       return {
         type: 'explore',
         action: action as 'click' | 'scroll_down' | 'scroll_up',
-        target: functionCall.args.target as string | undefined,
-        reason: (functionCall.args.reason as string) || 'No reason provided',
+        target: args.target as string | undefined,
+        reason: (args.reason as string) || 'No reason provided',
       };
     }
     case 'done':
       return {
         type: 'done',
-        understanding: (functionCall.args.understanding as string) || 'No understanding provided',
-        keyElements: (functionCall.args.key_elements as Record<string, string | string[]>) || {},
+        understanding: (functionCall.args as Record<string, unknown>).understanding as string || 'No understanding provided',
+        keyElements: ((functionCall.args as Record<string, unknown>).key_elements as Record<string, string | string[]>) || {},
       };
     default:
       throw new Error(`Unknown tool "${functionCall.name}"`);
