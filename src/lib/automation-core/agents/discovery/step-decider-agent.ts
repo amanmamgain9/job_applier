@@ -18,7 +18,7 @@ import {
   type FunctionDeclarationsTool,
 } from '@google/generative-ai';
 import { createLogger } from '../../utils/logger';
-import { HandoffInput, HandoffOutput } from '../types/handoff';
+import { HandoffInput, HandoffOutput } from './types/handoff';
 
 const logger = createLogger('DiscoveryAgent');
 
@@ -279,7 +279,7 @@ What's your next move? Call explore() or done().`;
 // Main Entry Point
 // ============================================================================
 
-export async function runDiscoveryAgent(
+export async function runStepDecider(
   input: HandoffInput<DiscoveryAgentContext>
 ): Promise<HandoffOutput<DiscoveryDecision>> {
   const { goal, context } = input;

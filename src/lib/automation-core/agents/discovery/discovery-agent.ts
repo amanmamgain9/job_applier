@@ -1,25 +1,26 @@
 /**
- * Discovery Loop
+ * Discovery Agent
  * 
  * Phase 1 of the Recipe Generation System.
  * Explores a webpage to learn how to complete a task.
  * 
  * Called by Manager, returns ExplorationResult via handoff contract.
+ * Owns its memory (MemoryStore) and orchestrates sub-agents.
  */
 
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
-import { Page } from '../browser/page';
+import { Page } from '../../browser/page';
 import { MemoryStore, ExplorationResult } from './memory';
-import { runDiscoveryAgent, DiscoveryAction, DiscoveryDecision } from './agents/discovery-agent';
-import { runDiscoveryAnalyzer } from './agents/discovery-analyzer';
-import { runDiscoverySummarizer } from './agents/discovery-summarizer';
-import { domTreeToString } from '../utils/dom-to-text';
-import { ReportService } from '../reporting';
-import { createLogger, setReportSink } from '../utils/logger';
+import { runStepDecider, DiscoveryAction, DiscoveryDecision } from './step-decider-agent';
+import { runAnalyzer } from './analyzer-agent';
+import { runSummarizer } from './summarizer-agent';
+import { domTreeToString } from '../../utils/dom-to-text';
+import { ReportService } from '../../reporting';
+import { createLogger, setReportSink } from '../../utils/logger';
 import { ClassifierResult } from './memory/types';
 import { HandoffInput, HandoffOutput } from './types/handoff';
 
-const logger = createLogger('DiscoveryLoop');
+const logger = createLogger('DiscoveryAgent');
 
 function buildPageId(url: string): string {
   try {
@@ -56,7 +57,7 @@ interface ActionResult {
 // Main Entry Point
 // ============================================================================
 
-export async function runDiscoveryLoop(
+export async function runDiscovery(
   input: HandoffInput<DiscoveryContext>
 ): Promise<HandoffOutput<ExplorationResult>> {
   const { goal, context } = input;
@@ -64,7 +65,7 @@ export async function runDiscoveryLoop(
   if (!context) {
     return {
       goalCompleted: false,
-      reason: 'No context provided to discovery loop',
+      reason: 'No context provided to discovery agent',
     };
   }
   
@@ -79,7 +80,7 @@ export async function runDiscoveryLoop(
     setReportSink((msg) => report.logRaw(msg));
   }
 
-  logger.info('Starting discovery loop', { goal, maxSteps });
+  logger.info('Starting discovery', { goal, maxSteps });
 
   try {
     // Initialize
@@ -156,7 +157,7 @@ export async function runDiscoveryLoop(
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     const errorStack = error instanceof Error ? error.stack : undefined;
-    logger.error('Discovery loop error', { error: errorMessage, stack: errorStack });
+    logger.error('Discovery error', { error: errorMessage, stack: errorStack });
     report?.log(`[FATAL ERROR] ${errorMessage}`);
     if (errorStack) {
       report?.log(`[Stack] ${errorStack.split('\n').slice(0, 3).join(' | ')}`);
@@ -188,7 +189,7 @@ async function getDiscoveryDecision(
 ): Promise<DiscoveryDecision | null> {
   try {
     report?.log(`[Thinking...]`);
-    const result = await runDiscoveryAgent({
+    const result = await runStepDecider({
       goal: `Decide next action to: ${task}`,
       context: {
         apiKey,
@@ -349,7 +350,7 @@ async function analyzeChanges(
   try {
     report?.log(`[Analyzing...]`);
     
-    const analyzerResult = await runDiscoveryAnalyzer({
+    const analyzerResult = await runAnalyzer({
       goal: `Describe what changed after: ${actionDesc}`,
       context: {
         apiKey,
@@ -414,7 +415,7 @@ async function finishExploration(
   for (const pageId of memory.getPageIds()) {
     const pageNode = memory.getPage(pageId);
     if (pageNode && pageNode.rawObservations.length > 0) {
-      const summarizerResult = await runDiscoverySummarizer({
+      const summarizerResult = await runSummarizer({
         goal: `Consolidate observations for page: ${pageId}`,
         context: {
           llm,

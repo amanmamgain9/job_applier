@@ -1,7 +1,7 @@
 /**
  * automation-core - Browser automation library for Chrome Extensions
  * 
- * Main entry: Manager.run() or runDiscoveryLoop()
+ * Main entry: Manager.run() or runDiscovery()
  * 
  * See explorer/GOALS_AND_MEMORY.md for full design.
  */
@@ -15,49 +15,41 @@ export {
   type ManagerResult,
 } from './explorer/manager';
 
-// Discovery Loop - Phase 1
+// Discovery Agent - Phase 1
 export {
-  runDiscoveryLoop,
+  runDiscovery,
   type DiscoveryContext,
-} from './explorer/discovery-loop';
-
-// Discovery Agent (per-step decision maker)
-export {
-  runDiscoveryAgent,
-  type DiscoveryAction,
-  type DiscoveryDecision,
-  type DiscoveryAgentContext,
-} from './explorer/agents/discovery-agent';
+} from './agents/discovery';
 
 // Discovery Sub-Agents
 export {
-  runDiscoveryAnalyzer,
-  type DiscoveryAnalyzerContext,
-  type DiscoveryAnalyzerResult,
-} from './explorer/agents/discovery-analyzer';
+  runStepDecider,
+  type DiscoveryAction,
+  type DiscoveryDecision,
+} from './agents/discovery';
 
 export {
-  runDiscoverySummarizer,
-  type DiscoverySummarizerContext,
+  runAnalyzer,
+  type DiscoveryAnalyzerResult,
+} from './agents/discovery';
+
+export {
+  runSummarizer,
   type DiscoverySummarizerResult,
-} from './explorer/agents/discovery-summarizer';
+} from './agents/discovery';
 
 // Handoff Contracts
 export {
   type HandoffInput,
   type HandoffOutput,
-} from './explorer/types/handoff';
+} from './agents/discovery';
 
-// Exploration types
+// Memory & Types
 export {
   type ExplorationResult,
   type PageNode,
-  type Edge,
-  type ClassifierResult,
-  type BehaviorPattern,
-  type KeyElements,
   MemoryStore,
-} from './explorer';
+} from './agents/discovery';
 
 // Report Service - streaming reports
 export {

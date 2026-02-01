@@ -7,7 +7,7 @@
 
 import { 
   BrowserContext, 
-  runDiscoveryLoop,
+  runDiscovery,
   createChatModel,
   ReportService,
   type ExplorationResult,
@@ -191,7 +191,7 @@ export async function startDiscovery(options: DiscoveryOptions): Promise<Discove
     report.startStep('Exploring page with LLM agents');
     updateState({ currentStep: 3 });
     
-    const discoveryResult = await runDiscoveryLoop({
+    const discoveryResult = await runDiscovery({
       goal: task,
       context: {
         page,

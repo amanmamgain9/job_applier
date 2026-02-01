@@ -9,8 +9,7 @@
 
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { Page } from '../browser/page';
-import { ExplorationResult } from './memory';
-import { runDiscoveryLoop, DiscoveryContext } from './discovery-loop';
+import { ExplorationResult, runDiscovery, DiscoveryContext } from '../agents/discovery';
 import { ReportService } from '../reporting';
 import { createLogger } from '../utils/logger';
 
@@ -85,7 +84,7 @@ export class Manager {
         maxSteps: this.options.maxSteps,
       };
 
-      const discoveryResult = await runDiscoveryLoop({
+      const discoveryResult = await runDiscovery({
         goal: task,
         context: discoveryContext,
       });

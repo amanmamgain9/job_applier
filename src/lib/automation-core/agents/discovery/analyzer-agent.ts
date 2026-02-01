@@ -9,7 +9,7 @@
 
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { createLogger } from '../../utils/logger';
-import { HandoffInput, HandoffOutput } from '../types/handoff';
+import { HandoffInput, HandoffOutput } from './types/handoff';
 
 const logger = createLogger('DiscoveryAnalyzer');
 
@@ -67,7 +67,7 @@ Be specific and factual. Describe what you see, not assumptions.`;
 // Main Entry Point
 // ============================================================================
 
-export async function runDiscoveryAnalyzer(
+export async function runAnalyzer(
   input: HandoffInput<DiscoveryAnalyzerContext>
 ): Promise<HandoffOutput<DiscoveryAnalyzerResult>> {
   const { goal, context } = input;

@@ -7,7 +7,7 @@
 
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { HumanMessage, SystemMessage, AIMessage } from '@langchain/core/messages';
-import { HandoffInput, HandoffOutput } from '../types/handoff';
+import { HandoffInput, HandoffOutput } from './types/handoff';
 
 // ============================================================================
 // Types
@@ -93,10 +93,10 @@ Provide a condensed summary that incorporates all observations into a coherent u
 // Main Entry Point
 // ============================================================================
 
-export async function runDiscoverySummarizer(
+export async function runSummarizer(
   input: HandoffInput<DiscoverySummarizerContext>
 ): Promise<HandoffOutput<DiscoverySummarizerResult>> {
-  const { goal, context } = input;
+  const { context } = input;
   
   if (!context) {
     return {
