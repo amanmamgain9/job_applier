@@ -93,8 +93,7 @@ async function handleMessage(
         .then((result) => {
           logger.info('Discovery completed', { 
             success: result.success, 
-            pagesExplored: result.exploration?.pages?.size ?? 0,
-            navigationPath: result.exploration?.navigationPath,
+            pagesExplored: result.exploration?.pageKeys?.length ?? 0,
           });
         })
         .catch((err) => {

@@ -1,14 +1,16 @@
-# Refactor Plan: Current → Target Architecture
+# Refactor Plan: Legacy → Current Architecture
+
+Note: This document captures the refactor history. Sections labeled **Legacy** describe pre-refactor code and are not expected to match the current implementation.
 
 ---
 
-## Current Implementation
+## Legacy Implementation (pre-refactor)
 
 ```
 External code calls:
     runOrchestrator(options)
         │
-        ├── MemoryStore (Discovery memory)
+        ├── DiscoverEventLog (event log)
         ├── actionHistory[] (local variable)
         │
         └── while loop:
@@ -16,7 +18,7 @@ External code calls:
               │     └── runDiscoverer() → generates context summary
               ├── page.click/scroll()
               ├── runAnalyzer() → visual diff
-              └── memory.addObservation()
+              └── record analyzer/page-change event
               
         └── on done:
               └── runSummarizer() per page
@@ -31,7 +33,7 @@ External code calls:
 
 ---
 
-## Target Architecture
+## Current Architecture (post-refactor)
 
 ```
 External code calls:
@@ -42,13 +44,13 @@ External code calls:
         │
         ├── Phase 1: Discovery.run(goal, context)
         │     │
-        │     ├── DiscoveryMemory (current MemoryStore)
+        │     ├── DiscoverEventLog (current Discovery state)
         │     │
         │     └── while loop:
         │           ├── DiscoveryAgent.decide() → explore/done
         │           ├── page.execute()
         │           ├── DiscoveryAnalyzer.run(goal, context) → significantChange
-        │           └── memory.addObservation()
+        │           └── record analyzer/page-change event
         │     
         │     └── on done:
         │           └── DiscoverySummarizer.run() per page

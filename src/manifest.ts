@@ -21,7 +21,6 @@ export default defineManifest({
   ],
   
   action: {
-    // No popup - clicking icon opens full page tab
     default_icon: {
       '16': 'public/assets/icon-16.png',
       '48': 'public/assets/icon-48.png',
@@ -49,9 +48,16 @@ export default defineManifest({
     '128': 'public/assets/icon-128.png',
   },
   
-  // Required for Anthropic API calls from extension
   content_security_policy: {
     extension_pages: "script-src 'self'; object-src 'self'",
   },
+
+  web_accessible_resources: [
+    {
+      matches: ['<all_urls>'],
+      resources: ['**/*', '*'],
+      use_dynamic_url: false,
+    },
+  ],
 });
 

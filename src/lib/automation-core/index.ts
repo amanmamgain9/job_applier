@@ -47,8 +47,6 @@ export {
 // Memory & Types
 export {
   type ExplorationResult,
-  type PageNode,
-  MemoryStore,
 } from './agents/discovery';
 
 // Report Service - streaming reports

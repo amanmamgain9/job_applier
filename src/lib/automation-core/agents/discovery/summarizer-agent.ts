@@ -15,13 +15,13 @@ import { HandoffInput, HandoffOutput } from './types/handoff';
 
 export interface DiscoverySummarizerContext {
   llm: BaseChatModel;
-  pageId: string;
+  pageKey: string;
   observations: string[];
   currentUnderstanding: string;
 }
 
 export interface DiscoverySummarizerResult {
-  pageId: string;
+  pageKey: string;
   summary: string;
 }
 
@@ -70,7 +70,7 @@ const summarizeTool = {
 // ============================================================================
 
 function buildPrompt(
-  pageId: string,
+  pageKey: string,
   observations: string[],
   currentUnderstanding: string
 ): string {
@@ -78,7 +78,7 @@ function buildPrompt(
     ? observations.map((o, i) => `${i + 1}. ${o}`).join('\n')
     : '(no additional observations)';
 
-  return `Page: ${pageId}
+  return `Page key: ${pageKey}
 
 Current understanding:
 ${currentUnderstanding}
@@ -105,20 +105,20 @@ export async function runSummarizer(
     };
   }
   
-  const { llm, pageId, observations, currentUnderstanding } = context;
+  const { llm, pageKey, observations, currentUnderstanding } = context;
 
   // If no observations, just return current understanding
   if (observations.length === 0) {
     return {
       goalCompleted: true,
-      result: { pageId, summary: currentUnderstanding },
+      result: { pageKey, summary: currentUnderstanding },
     };
   }
 
   try {
     const messages = [
       new SystemMessage(SYSTEM_PROMPT),
-      new HumanMessage(buildPrompt(pageId, observations, currentUnderstanding)),
+      new HumanMessage(buildPrompt(pageKey, observations, currentUnderstanding)),
     ];
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -132,7 +132,7 @@ export async function runSummarizer(
       return {
         goalCompleted: true,
         result: {
-          pageId,
+          pageKey,
           summary: currentUnderstanding + (observations[0] ? ` ${observations[0]}` : ''),
         },
       };
@@ -146,7 +146,7 @@ export async function runSummarizer(
     return {
       goalCompleted: true,
       result: {
-        pageId: args.page_id,
+        pageKey: args.page_id,
         summary: args.summary,
       },
     };
@@ -155,7 +155,7 @@ export async function runSummarizer(
     return {
       goalCompleted: false,
       result: {
-        pageId,
+        pageKey,
         summary: currentUnderstanding,
       },
       reason: errorMsg,

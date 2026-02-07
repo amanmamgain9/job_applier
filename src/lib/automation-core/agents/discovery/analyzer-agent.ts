@@ -9,7 +9,9 @@
 
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { createLogger } from '../../utils/logger';
+import type { ReportService } from '../../reporting';
 import { HandoffInput, HandoffOutput } from './types/handoff';
+import { runPageMatch } from './page-match-agent';
 
 const logger = createLogger('DiscoveryAnalyzer');
 
@@ -32,6 +34,63 @@ export interface DiscoveryAnalyzerResult {
   urlChanged: boolean;       // Did URL change?
   significantChange: boolean; // Did page/state fundamentally change?
 }
+
+export interface PageChangeContext {
+  apiKey: string;
+  model?: string;
+  action: string;
+  beforeUrl: string;
+  afterUrl: string;
+  beforeScreenshot: string | null;
+  afterScreenshot: string | null;
+  domSample: string;
+  existingPages: Array<{
+    pageKey: string;
+    lastUrl: string;
+    screenshot: string;
+  }>;
+}
+
+export interface PageChangeResult {
+  analysis: DiscoveryAnalyzerResult;
+  pageKey?: string;
+  matchedPageKey?: string;
+  newPageKey?: string;
+}
+
+export interface PageChangeLogEvent {
+  kind: string;
+  meta?: {
+    beforeUrl?: string;
+    afterUrl?: string;
+  };
+}
+
+export interface PageChangeEventLog {
+  getPageKeys(): string[];
+  getEventsForPage(pageKey: string): PageChangeLogEvent[];
+  getCurrentPageKey(): string | null;
+  setCurrent(pageKey: string): void;
+  getSnapshots(): Array<{ pageKey: string; lastUrl: string; screenshot: string }>;
+  setSnapshot(pageKey: string, url: string, screenshot: string | null): void;
+  addAnalyzerEvent(
+    output: HandoffOutput<DiscoveryAnalyzerResult>,
+    meta: {
+      beforeUrl: string;
+      afterUrl: string;
+    }
+  ): void;
+  addPageChangeEvent(
+    output: HandoffOutput<PageChangeResult>,
+    meta: {
+      beforeUrl: string;
+      afterUrl: string;
+      fromPageKey?: string;
+      toPageKey?: string;
+    }
+  ): void;
+}
+
 
 // ============================================================================
 // System Prompt
@@ -91,16 +150,12 @@ export async function runAnalyzer(
   
   const urlChanged = beforeUrl !== afterUrl;
   
-  // If no screenshots, return minimal info
+  // If no screenshots, fail fast
   if (!beforeScreenshot || !afterScreenshot) {
     logger.warning('Missing screenshots for visual analysis');
     return {
-      goalCompleted: true,
-      result: {
-        summary: urlChanged ? `Navigated to ${afterUrl}` : 'No screenshots available',
-        urlChanged,
-        significantChange: urlChanged, // URL change is significant by default
-      },
+      goalCompleted: false,
+      reason: 'Missing screenshots for visual analysis',
     };
   }
   
@@ -138,6 +193,205 @@ export async function runAnalyzer(
     };
   }
 }
+
+// ============================================================================
+// Page Change Analysis (Analyzer + Page Match + ID)
+// ============================================================================
+
+export async function runPageChangeAnalysis(
+  input: HandoffInput<PageChangeContext>
+): Promise<HandoffOutput<PageChangeResult>> {
+  const { goal, context } = input;
+  if (!context) {
+    return { goalCompleted: false, reason: 'No context provided' };
+  }
+
+  const {
+    apiKey,
+    model,
+    action,
+    beforeUrl,
+    afterUrl,
+    beforeScreenshot,
+    afterScreenshot,
+    domSample,
+    existingPages,
+  } = context;
+
+  const analysisResult = await runAnalyzer({
+    goal,
+    context: { apiKey, model, action, beforeUrl, afterUrl, beforeScreenshot, afterScreenshot },
+  });
+
+  if (!analysisResult.goalCompleted || !analysisResult.result) {
+    return {
+      goalCompleted: false,
+      reason: analysisResult.reason || 'Analyzer failed',
+    };
+  }
+
+  const analysis = analysisResult.result;
+  if (!analysis.urlChanged) {
+    return { goalCompleted: true, result: { analysis } };
+  }
+
+  if (!afterScreenshot) {
+    const fallbackKey = buildPageIdFallback(afterUrl);
+    return {
+      goalCompleted: true,
+      result: {
+        analysis,
+        pageKey: fallbackKey,
+        newPageKey: fallbackKey,
+      },
+    };
+  }
+
+  for (const candidate of existingPages) {
+    const match = await runPageMatch({
+      goal: `Is this the same page as ${candidate.pageKey}?`,
+      context: {
+        apiKey,
+        model,
+        beforeUrl: candidate.lastUrl,
+        afterUrl,
+        beforeScreenshot: candidate.screenshot,
+        afterScreenshot,
+      },
+    });
+
+    if (match.goalCompleted && match.result?.isSamePage) {
+      return {
+        goalCompleted: true,
+        result: {
+          analysis,
+          pageKey: candidate.pageKey,
+          matchedPageKey: candidate.pageKey,
+        },
+      };
+    }
+  }
+
+  const newPageId = await buildPageIdWithLlm({
+    apiKey,
+    model,
+    url: afterUrl,
+    domSample: domSample.slice(0, 2000),
+    summary: analysis.summary,
+    beforeScreenshot,
+    afterScreenshot,
+  });
+
+  return {
+    goalCompleted: true,
+    result: {
+      analysis,
+      pageKey: newPageId,
+      newPageKey: newPageId,
+    },
+  };
+}
+
+export async function analyzeAndRecordPageChange(input: {
+  eventLog: PageChangeEventLog;
+  apiKey: string;
+  model: string | undefined;
+  actionDesc: string;
+  beforeUrl: string;
+  afterUrl: string;
+  beforeScreenshot: string | null;
+  afterScreenshot: string | null;
+  afterDom: string;
+  report?: ReportService;
+}): Promise<void> {
+  const {
+    eventLog,
+    apiKey,
+    model,
+    actionDesc,
+    beforeUrl,
+    afterUrl,
+    beforeScreenshot,
+    afterScreenshot,
+    afterDom,
+    report,
+  } = input;
+
+  try {
+    report?.log(`[Analyzing...]`);
+
+    const existingPages = eventLog.getSnapshots();
+
+    const fromPageKey = eventLog.getCurrentPageKey();
+    const result = await runPageChangeAnalysis({
+      goal: `Describe what changed after: ${actionDesc}`,
+      context: {
+        apiKey,
+        model,
+        action: actionDesc,
+        beforeUrl,
+        afterUrl,
+        beforeScreenshot,
+        afterScreenshot,
+        domSample: afterDom,
+        existingPages,
+      },
+    });
+
+    if (!result.goalCompleted || !result.result) {
+      const msg = result.reason || 'Analysis failed';
+      report?.log(`[Error] ${msg}`);
+      eventLog.addPageChangeEvent(result, {
+        beforeUrl,
+        afterUrl,
+      });
+      return;
+    }
+
+    const pageChange = result.result;
+    const analysis = pageChange.analysis;
+    const matchedPageKey = pageChange.matchedPageKey;
+    const resolvedPageKey = analysis.urlChanged
+      ? (matchedPageKey || pageChange.pageKey || afterUrl.replace(/[^a-zA-Z0-9]+/g, '_'))
+      : undefined;
+
+    eventLog.addPageChangeEvent(result, {
+      beforeUrl,
+      afterUrl,
+      fromPageKey: fromPageKey ?? undefined,
+      toPageKey: resolvedPageKey,
+    });
+    if (fromPageKey) {
+      eventLog.setSnapshot(fromPageKey, beforeUrl, beforeScreenshot);
+    }
+    if (analysis.urlChanged) {
+      const nextKey = resolvedPageKey || afterUrl.replace(/[^a-zA-Z0-9]+/g, '_');
+      eventLog.setSnapshot(nextKey, afterUrl, afterScreenshot);
+    } else if (fromPageKey) {
+      eventLog.setSnapshot(fromPageKey, afterUrl, afterScreenshot);
+    }
+
+    report?.log(`[Result] ${analysis.summary}`);
+
+    if (analysis.urlChanged && !matchedPageKey) {
+      report?.log(`[Navigation] URL changed`);
+      eventLog.setCurrent(resolvedPageKey || afterUrl.replace(/[^a-zA-Z0-9]+/g, '_'));
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    report?.log(`[Error] ${msg}`);
+    eventLog.addAnalyzerEvent({ goalCompleted: false, reason: msg }, {
+      beforeUrl,
+      afterUrl,
+    });
+  }
+}
+
+
+// ============================================================================
+// Page Match (Same Page Detection)
+// ============================================================================
+
 
 // ============================================================================
 // Vision LLM Call
@@ -242,6 +496,57 @@ async function analyzeWithVision(
       urlChanged,
       significantChange: urlChanged || !/(no changes|no visible|unchanged|identical|same as before)/i.test(text),
     };
+  }
+}
+
+function buildPageIdFallback(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const normalized = `${parsed.hostname}${parsed.pathname}${parsed.search}`;
+    return normalized.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  } catch {
+    return url.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  }
+}
+
+async function buildPageIdWithLlm(params: {
+  apiKey: string;
+  model: string | undefined;
+  url: string;
+  domSample: string;
+  summary?: string;
+  beforeScreenshot?: string | null;
+  afterScreenshot?: string | null;
+}): Promise<string> {
+  const { apiKey, model = 'gemini-3-flash-preview', url, domSample, summary, beforeScreenshot, afterScreenshot } = params;
+  try {
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const genModel = genAI.getGenerativeModel({ model });
+    const prompt = [
+      'Create a stable page id for a SPA view.',
+      'Return ONLY a short lowercase id with letters/numbers/underscores.',
+      '',
+      `URL: ${url}`,
+      summary ? `Summary: ${summary}` : '',
+      `DOM sample: ${domSample}`.trim(),
+    ].filter(Boolean).join('\n');
+    const parts: Array<{ text?: string; inlineData?: { mimeType: string; data: string } }> = [
+      { text: prompt },
+    ];
+    if (beforeScreenshot) {
+      parts.push({ inlineData: { mimeType: 'image/jpeg', data: beforeScreenshot } });
+    }
+    if (afterScreenshot) {
+      parts.push({ inlineData: { mimeType: 'image/jpeg', data: afterScreenshot } });
+    }
+    const result = await genModel.generateContent({
+      contents: [{ role: 'user', parts }],
+    } as unknown as any);
+    const text = result.response.text().trim();
+    const normalized = text.toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
+    return normalized || buildPageIdFallback(url);
+  } catch {
+    return buildPageIdFallback(url);
   }
 }
 

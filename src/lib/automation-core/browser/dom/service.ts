@@ -9,6 +9,7 @@ import type { ViewportInfo } from './history';
 import { isNewTabPage } from '../util';
 
 const logger = createLogger('DOMService');
+const BUILD_DOM_TREE_VERSION = 'scroll-diag-v2';
 
 /**
  * Get the clickable elements for the current page
@@ -58,7 +59,7 @@ export async function getRawDomTree(
         viewportExpansion: 0,
         startId: 0,
         startHighlightIndex: 0,
-        debugMode: false,
+        debugMode: true,
       },
     ],
   });
@@ -282,7 +283,10 @@ async function scriptInjectedFrames(tabId: number): Promise<Map<number, boolean>
   try {
     const results = await chrome.scripting.executeScript({
       target: { tabId, allFrames: true },
-      func: () => Object.prototype.hasOwnProperty.call(window, 'buildDomTree'),
+      func: (expectedVersion: string) =>
+        Object.prototype.hasOwnProperty.call(window, 'buildDomTree') &&
+        window.buildDomTreeVersion === expectedVersion,
+      args: [BUILD_DOM_TREE_VERSION],
     });
     return new Map(results.map(result => [result.frameId, result.result || false]));
   } catch (err) {

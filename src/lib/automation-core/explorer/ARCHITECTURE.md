@@ -2,11 +2,11 @@
 
 ## Overview
 
-The explorer uses a **simple Manager loop** with automatic visual analysis, guided by explicit goals:
-- **Manager Agent** decides what action to take (click, scroll, done)
-- **Orchestrator** executes the action and **automatically** analyzes what changed
-- **Analyzer** compares before/after screenshots using vision LLM
-- **Memory** stores page info and navigation path
+The explorer uses a **Discovery loop** with automatic visual analysis, guided by explicit goals:
+- **Discovery Agent (step decider)** decides what action to take (click, scroll, done)
+- **Discovery loop** executes the action and **automatically** analyzes what changed
+- **Analyzer** compares before/after screenshots using vision LLM + PageMatch
+- **DiscoverEventLog** stores the event log and current page key
 - **Goals** (from the discovery request) act as a checklist and shape the final output
 
 ---
@@ -15,21 +15,21 @@ The explorer uses a **simple Manager loop** with automatic visual analysis, guid
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│                      MANAGER AGENT                              │
-│  Sees: task, goals, memory summary, action history, DOM        │
+│                 DISCOVERY AGENT (DECIDER)                      │
+│  Sees: task, goals, event-log summary, recent events, DOM      │
 │  Tools: explore(action, target, reason), done()                │
 │  Output: goal-by-goal understanding                            │
 └────────────────────────────────────────────────────────────────┘
                           │
                           ▼
 ┌────────────────────────────────────────────────────────────────┐
-│                      ORCHESTRATOR                               │
-│  1. Manager picks action                                        │
+│                   DISCOVERY LOOP (EXECUTION)                   │
+│  1. Step decider picks action                                   │
 │  2. Capture BEFORE screenshot                                   │
 │  3. Execute action (click/scroll)                               │
 │  4. Capture AFTER screenshot                                    │
-│  5. Run Analyzer (visual comparison)                            │
-│  6. Add result to action history                                │
+│  5. Run Analyzer + PageMatch                                    │
+│  6. Record analyzer/page-change event in log                    │
 │  7. Repeat                                                      │
 └────────────────────────────────────────────────────────────────┘
                           │
@@ -47,11 +47,11 @@ The explorer uses a **simple Manager loop** with automatic visual analysis, guid
 
 ## Key Design Principles
 
-### 1. Manager Only Picks Actions
+### 1. Discovery Agent Only Picks Actions
 
-The Manager has just TWO tools:
+The Discovery Agent has just TWO tools:
 - `explore(action, target, reason)` - Click or scroll
-- `done(understanding, key_elements)` - Finish exploration
+- `done(understanding)` - Finish exploration
 
 **Analysis is automatic** - happens after every explore action.
 
@@ -76,12 +76,12 @@ Instead of complex DOM diffing, we:
 
 ### 3. Simple Output
 
-The Analyzer returns just:
+The Analyzer returns:
 ```typescript
-interface AnalyzerOutput {
+interface DiscoveryAnalyzerResult {
   summary: string;           // "Details panel appeared with job info"
   urlChanged: boolean;
-  hasVisualChanges: boolean;
+  significantChange: boolean;
 }
 ```
 
@@ -119,7 +119,7 @@ After Screenshot ───┘
 
 ## Agents
 
-### 1. Manager Agent
+### 1. Discovery Agent (Step Decider)
 
 **Purpose:** Decide what action to take next.
 
@@ -128,12 +128,12 @@ After Screenshot ───┘
 | Tool | Description |
 |------|-------------|
 | `explore(action, target?, reason)` | Take action: click, scroll_down, scroll_up |
-| `done(understanding, key_elements)` | Finish exploration |
+| `done(understanding)` | Finish exploration |
 
 **Prompt Context:**
 - Task description
-- Memory summary
-- Recent action history (with analysis summaries)
+- Event-log summary
+- Recent event log entries (with analyzer/page-change events)
 - Current DOM (text representation for selector lookup)
 
 ### 2. Analyzer
@@ -148,9 +148,21 @@ After Screenshot ───┘
 **Output:**
 - `summary`: Human-readable description
 - `urlChanged`: Boolean
-- `hasVisualChanges`: Boolean
+- `significantChange`: Boolean
 
-### 3. Summarizer Agent
+### 3. Page Match Agent
+
+**Purpose:** Decide if two page states are the same page key.
+
+**Input:**
+- Before/after URLs
+- Before/after screenshots (base64 JPEG)
+
+**Output:**
+- `isSamePage`: Boolean
+- `reason`: short explanation
+
+### 4. Summarizer Agent
 
 **Purpose:** Compress observations into concise understanding.
 
@@ -159,32 +171,21 @@ After Screenshot ───┘
 
 ---
 
-## Memory Store
+## Discovery State
 
 ### Data Structure
 
 ```typescript
-interface MemoryStore {
-  pages: Map<string, PageNode>;
-  currentPageId: string | null;
-  navigationPath: string[];
+interface DiscoverEventLog {
+  events: DiscoveryEvent[];          // event log
+  currentPageKey: string | null;
 }
 
-interface PageNode {
-  id: string;                     // "www_linkedin_com"
-  understanding: string;          // Task/purpose
-  rawObservations: string[];      // Action history
-}
-```
-
-### Key Methods
-
-```typescript
-class MemoryStore {
-  initializePage(pageId, understanding, url): void;
-  getSummary(): string;
-  getDiscoveredSelectors(): KeyElements;
-}
+type DiscoveryEvent =
+  | { kind: 'decision'; pageKey: string; timestamp: number; output: HandoffOutput<DiscoveryDecision> }
+  | { kind: 'analyzer'; pageKey: string; timestamp: number; output: HandoffOutput<DiscoveryAnalyzerResult>; meta: { beforeUrl: string; afterUrl: string; beforeScreenshot: string | null; afterScreenshot: string | null } }
+  | { kind: 'page_change'; pageKey: string; timestamp: number; output: HandoffOutput<PageChangeResult>; meta: { beforeUrl: string; afterUrl: string; beforeScreenshot: string | null; afterScreenshot: string | null; fromPageKey?: string; toPageKey?: string } }
+  | { kind: 'summarizer'; pageKey: string; timestamp: number; output: HandoffOutput<DiscoverySummarizerResult> };
 ```
 
 ---
@@ -192,18 +193,19 @@ class MemoryStore {
 ## Workflow Example
 
 ```
-Step 1: Manager → explore(click, "#ember244", "see job details")
-        Orchestrator → takes BEFORE screenshot
-        Orchestrator → clicks element
-        Orchestrator → takes AFTER screenshot
+Step 1: Decider → explore(click, "#ember244", "see job details")
+        Discovery Loop → takes BEFORE screenshot
+        Discovery Loop → clicks element
+        Discovery Loop → takes AFTER screenshot
         Analyzer → sends both to vision LLM
         LLM → "Job details panel appeared on the right with title and Apply button"
-        History: click "#ember244" → Job details panel appeared on the right...
+        PageMatch → decide if this is an existing page key
+        EventLog: page_change → Job details panel appeared on the right...
 
-Step 2: Manager (sees history) → explore(click, ".apply-btn", "try applying")
+Step 2: Decider (sees event log) → explore(click, ".apply-btn", "try applying")
         ...
 
-Step N: Manager → done(understanding, key_elements)
+Step N: Decider → done(understanding)
 ```
 
 ---
@@ -213,15 +215,9 @@ Step N: Manager → done(understanding, key_elements)
 ```typescript
 interface ExplorationResult {
   success: boolean;
-  pages: Map<string, PageNode>;
-  navigationPath: string[];
+  pageKeys: string[];
+  events: DiscoveryEvent[];
   finalUnderstanding: string; // goal-by-goal summary
-  keyElements?: {
-    filter_button?: string;
-    apply_button?: string;
-    job_listings?: string[];
-    search_input?: string;
-  };
   error?: string;
 }
 ```
@@ -233,7 +229,7 @@ interface ExplorationResult {
 ### Phase 1 (current): Goal-Driven Discovery
 - Accept task + explicit goals from the discovery request
 - Explore the page to satisfy each goal
-- Output a goal-by-goal understanding and key selectors
+- Output a goal-by-goal understanding
 
 ### Phase 2 (next): Goal Execution
 - Use the discovered selectors and understanding to execute the goals
@@ -244,19 +240,25 @@ interface ExplorationResult {
 ## File Structure
 
 ```
-src/lib/automation-core/explorer/
-├── ARCHITECTURE.md          # This document
-├── index.ts                 # Exports
-├── orchestrator.ts          # Simple manager loop with visual analysis
-├── agents/
-│   ├── index.ts             # Agent exports
-│   ├── manager.ts           # Decides actions
-│   ├── analyzer.ts          # Visual comparison + LLM summary
-│   └── summarizer.ts        # Final summarization
-└── memory/
-    ├── index.ts             # Memory exports
-    ├── store.ts             # MemoryStore class
-    └── types.ts             # PageNode, etc.
+src/lib/automation-core/
+├── explorer/
+│   ├── ARCHITECTURE.md          # This document
+│   ├── GOALS_AND_MEMORY.md      # Architecture + memory contract
+│   ├── manager.ts               # Manager (Phase coordinator)
+│   └── index.ts                 # Exports
+├── agents/discovery/
+│   ├── discovery-agent.ts       # Discovery loop + step decider
+│   ├── analyzer-agent.ts        # Visual diff + page match orchestration
+│   ├── page-match-agent.ts      # Same-page detection
+│   ├── summarizer-agent.ts      # End-of-run summarizer
+│   ├── discover-event-log.ts    # DiscoverEventLog
+│   ├── memory/
+│   │   └── types.ts             # DiscoveryEvent, ExplorationResult
+│   └── types/
+│       └── handoff.ts           # HandoffInput/HandoffOutput
+└── browser/
+    ├── page.ts                  # Page API
+    └── dom/                     # DOM utilities
 ```
 
 ---

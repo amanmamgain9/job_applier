@@ -100,7 +100,7 @@ export class Manager {
 
       this.memory.discoveryResult = discoveryResult.result;
       logger.info('Discovery completed', { 
-        pagesExplored: discoveryResult.result?.pages.size,
+        pagesExplored: discoveryResult.result?.pageKeys.length,
         success: discoveryResult.result?.success,
       });
 
@@ -143,8 +143,8 @@ export class Manager {
 function makeEmptyResult(): ExplorationResult {
   return {
     success: false,
-    pages: new Map(),
-    navigationPath: [],
+    pageKeys: [],
+    events: [],
     finalUnderstanding: '',
     error: 'No exploration performed',
   };

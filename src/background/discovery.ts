@@ -194,21 +194,21 @@ export async function startDiscovery(options: DiscoveryOptions): Promise<Discove
     const discoveryResult = await runDiscovery({
       goal: task,
       context: {
-        page,
-        goals,
-        llm,
-        apiKey,
-        model: modelName,
-        report,
-        maxSteps: 25, // Max exploration actions
+      page,
+      goals,
+      llm,
+      apiKey,
+      model: modelName,
+      report,
+      maxSteps: 25, // Max exploration actions
       },
     });
     
     // Extract exploration result from handoff output
     const exploration: ExplorationResult = discoveryResult.result || {
       success: false,
-      pages: new Map(),
-      navigationPath: [],
+      pageKeys: [],
+      events: [],
       finalUnderstanding: '',
       error: discoveryResult.reason || 'Discovery failed',
     };
@@ -216,8 +216,7 @@ export async function startDiscovery(options: DiscoveryOptions): Promise<Discove
     report.endStep(discoveryResult.goalCompleted, discoveryResult.reason);
     
     console.log('[Discovery] Exploration complete:', {
-      pagesFound: exploration.pages.size,
-      navigationPath: exploration.navigationPath,
+      pagesFound: exploration.pageKeys.length,
       success: exploration.success,
     });
     

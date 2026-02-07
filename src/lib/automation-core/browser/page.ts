@@ -203,13 +203,21 @@ export class Page {
    * Get the raw DOM tree output directly from buildDomTree.js
    * Returns the flat map as JSON string for the LLM.
    */
-  async getRawDom(): Promise<string> {
+  async getRawDom(): Promise<{
+    map: Record<string, unknown>;
+    buildDomTreeVersion?: string;
+    scrollDiagnostics?: Array<Record<string, unknown>>;
+  }> {
     if (!this._validWebPage) {
-      return '{}';
+      return { map: {} };
     }
     await this.waitForPageAndFramesLoad();
     const rawResult = await _getRawDomTree(this._tabId, this._state.url);
-    return JSON.stringify(rawResult.map, null, 2);
+    return {
+      map: rawResult.map,
+      buildDomTreeVersion: rawResult.buildDomTreeVersion,
+      scrollDiagnostics: rawResult.scrollDiagnostics,
+    };
   }
 
   async _updateState(useVision = false, focusElement = -1): Promise<PageState> {
@@ -401,7 +409,10 @@ export class Page {
     }
 
     if (!elementNode) {
-      await this._puppeteerPage.evaluate('window.scrollBy(0, -(window.visualViewport?.height || window.innerHeight));');
+      const scrolled = await this.scrollMainContainer(-(window.visualViewport?.height || window.innerHeight));
+      if (!scrolled) {
+        await this._puppeteerPage.evaluate('window.scrollBy(0, -(window.visualViewport?.height || window.innerHeight));');
+      }
     } else {
       const element = await this.locateElement(elementNode);
       if (!element) {
@@ -419,7 +430,10 @@ export class Page {
     }
 
     if (!elementNode) {
-      await this._puppeteerPage.evaluate('window.scrollBy(0, (window.visualViewport?.height || window.innerHeight));');
+      const scrolled = await this.scrollMainContainer(window.visualViewport?.height || window.innerHeight);
+      if (!scrolled) {
+        await this._puppeteerPage.evaluate('window.scrollBy(0, (window.visualViewport?.height || window.innerHeight));');
+      }
     } else {
       const element = await this.locateElement(elementNode);
       if (!element) {
@@ -429,6 +443,31 @@ export class Page {
         el.scrollBy(0, el.clientHeight);
       });
     }
+  }
+
+  private async scrollMainContainer(deltaY: number): Promise<boolean> {
+    if (!this._puppeteerPage) {
+      return false;
+    }
+    return this._puppeteerPage.evaluate((delta) => {
+      const candidates = Array.from(document.querySelectorAll('*')).filter((el) => {
+        const style = window.getComputedStyle(el as Element);
+        const overflowY = style.overflowY;
+        const isScrollable =
+          (overflowY === 'auto' || overflowY === 'scroll') &&
+          (el as HTMLElement).scrollHeight > (el as HTMLElement).clientHeight + 10;
+        if (!isScrollable) return false;
+        const rect = (el as HTMLElement).getBoundingClientRect();
+        const visible = rect.height > 120 && rect.width > 120;
+        return visible;
+      }) as HTMLElement[];
+
+      if (candidates.length === 0) return false;
+      candidates.sort((a, b) => (b.clientHeight * b.clientWidth) - (a.clientHeight * a.clientWidth));
+      const target = candidates[0];
+      target.scrollBy(0, delta);
+      return true;
+    }, deltaY);
   }
 
   async sendKeys(keys: string): Promise<void> {
@@ -1175,6 +1214,70 @@ export class Page {
     } catch (error) {
       logger.warning(`Failed to evaluate on element ${index}:`, error);
       return null;
+    }
+  }
+
+  /**
+   * Execute a high-level action (click, scroll) on the page
+   * Generic action dispatcher for automation agents
+   */
+  async executeAction(
+    action: { action: 'click' | 'scroll_down' | 'scroll_up'; target?: string }
+  ): Promise<{ success: boolean; description: string }> {
+    try {
+      let description = '';
+      
+      switch (action.action) {
+        case 'click':
+          if (!action.target) {
+            return { success: false, description: 'click (no target)' };
+          }
+          await this.clickSelector(action.target);
+          description = `click "${action.target}"`;
+          break;
+          
+        case 'scroll_down':
+          if (!action.target) {
+            return { success: false, description: 'scroll down (no target)' };
+          }
+          await this.scrollSelector(action.target, 1);
+          description = `scroll down "${action.target}"`;
+          break;
+          
+        case 'scroll_up':
+          if (!action.target) {
+            return { success: false, description: 'scroll up (no target)' };
+          }
+          await this.scrollSelector(action.target, -1);
+          description = `scroll up "${action.target}"`;
+          break;
+      }
+      
+      // Wait for page updates
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      return { success: true, description };
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      logger.warning(`Action failed: ${errorMsg}`);
+      return { success: false, description: action.action };
+    }
+  }
+
+  private async scrollSelector(selector: string, direction: 1 | -1): Promise<void> {
+    if (!this._puppeteerPage) {
+      throw new Error('Puppeteer is not connected');
+    }
+    const scrolled = await this._puppeteerPage.evaluate((sel, dir) => {
+      const el = document.querySelector(sel) as HTMLElement | null;
+      if (!el) return false;
+      const delta = dir * (el.clientHeight || 400);
+      const beforeTop = el.scrollTop;
+      el.scrollBy(0, delta);
+      return el.scrollTop !== beforeTop;
+    }, selector, direction);
+    if (!scrolled) {
+      throw new Error(`Scroll target did not move: ${selector}`);
     }
   }
 }

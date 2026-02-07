@@ -11,16 +11,13 @@ export { Manager, runManager, type ManagerOptions, type ManagerMemory, type Mana
 export {
   runDiscovery,
   type DiscoveryContext,
-  runStepDecider,
   type DiscoveryAction,
   type DiscoveryDecision,
   runAnalyzer,
   type DiscoveryAnalyzerResult,
   runSummarizer,
   type DiscoverySummarizerResult,
-  MemoryStore,
   type ExplorationResult,
-  type PageNode,
   type HandoffInput,
   type HandoffOutput,
 } from '../agents/discovery';

@@ -6,15 +6,21 @@
  */
 
 // Main agent
-export { runDiscovery, type DiscoveryContext } from './discovery-agent';
+export {
+  runDiscovery,
+  runStepDecider,
+  type DiscoveryContext,
+  type DiscoveryAction,
+  type DiscoveryDecision,
+} from './discovery-agent';
 
-// Sub-agents
-export { runStepDecider, type DiscoveryAction, type DiscoveryDecision } from './step-decider-agent';
+// Sub-agents (visual analysis, summarization)
 export { runAnalyzer, type DiscoveryAnalyzerResult } from './analyzer-agent';
+export { runPageMatch, type PageMatchContext, type PageMatchResult } from './page-match-agent';
 export { runSummarizer, type DiscoverySummarizerResult } from './summarizer-agent';
 
-// Memory
-export { MemoryStore, type ExplorationResult, type PageNode } from './memory';
+// Memory types
+export { type ExplorationResult } from './memory';
 
 // Types
 export { type HandoffInput, type HandoffOutput } from './types/handoff';

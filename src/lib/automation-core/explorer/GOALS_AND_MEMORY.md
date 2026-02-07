@@ -25,12 +25,14 @@ Manager (coordinates phases)
     │
     ├── Discovery (Phase 1) ─── runs its own loop
     │     │
-    │     ├── Discovery Memory
-    │     │     └── PageNodes, Edges, Patterns, actionHistory
+    │     ├── DiscoverEventLog
+    │     │     └── DiscoveryEvent[] + currentPageKey
+    │     │
+    │     ├── Step Decider (per-step decision: explore/done)
     │     │
     │     └── Sub-agents:
-    │           ├── DiscoveryAnalyzer (visual diff after actions)
-    │           └── DiscoverySummarizer (consolidate observations at finish)
+    │           ├── Analyzer (visual diff after actions)
+    │           └── Summarizer (consolidate observations at finish)
     │
     ├── Recipe Generation (Phase 2) [not yet implemented]
     │     └── Composer (generates steps)
@@ -75,27 +77,19 @@ interface ManagerMemory {
 
 ---
 
-### Discovery Memory
+### DiscoverEventLog
 
 ```typescript
-interface DiscoveryMemory {
-  // Page graph
-  pages: Map<string, PageNode>;
-  currentPageId: string;
-  
-  // Navigation
-  navigationPath: string[];
-  actionHistory: string[];
-  
-  // Observations
-  pendingObservations: string[];
+// DiscoverEventLog is the single source of truth for Discovery state
+interface DiscoverEventLog {
+  events: DiscoveryEvent[];            // event log (what happened)
+  currentPageKey: string | null;
 }
 ```
 
 **What Discovery saves:**
-- PageNodes with patterns and edges (learned behaviors)
-- Action history (what was tried, what happened)
-- Navigation path (how we got here)
+- Event log (all sub-agent outputs + URLs + screenshots inside analyzer/page-change events)
+- Current page key (for tagging events)
 
 ---
 
@@ -105,10 +99,11 @@ Sub-agents are currently **stateless** — they take input and return output wit
 
 | Sub-Agent | Located | State |
 |-----------|---------|-------|
-| DiscoveryAnalyzer | `agents/discovery-analyzer.ts` | Stateless |
-| DiscoverySummarizer | `agents/discovery-summarizer.ts` | Stateless |
+| Analyzer | `agents/discovery/analyzer-agent.ts` | Stateless |
+| PageMatch | `agents/discovery/page-match-agent.ts` | Stateless |
+| Summarizer | `agents/discovery/summarizer-agent.ts` | Stateless |
 
-Discovery ingests sub-agent outputs into DiscoveryMemory (via `memory.addObservation()`).
+Discovery records sub-agent outputs as events in the event log.
 
 ---
 
@@ -139,8 +134,9 @@ interface HandoffOutput<TResult = unknown> {
 |------|----|--------------|---------|
 | Manager | Discovery | "Learn how to find job listings" | goalCompleted + ExplorationResult |
 | Manager | Composer | "Generate replayable recipe" | goalCompleted + Recipe |
-| Discovery | DiscoveryAnalyzer | "Describe what changed after click" | goalCompleted + summary |
-| Discovery | DiscoverySummarizer | "Consolidate observations for page" | goalCompleted + summary |
+| Discovery | Analyzer | "Describe what changed after click" | goalCompleted + summary |
+| Discovery | PageMatch | "Is this the same page?" | goalCompleted + isSamePage |
+| Discovery | Summarizer | "Consolidate observations for page" | goalCompleted + summary |
 
 ### Why Goal Only?
 
@@ -153,26 +149,29 @@ interface HandoffOutput<TResult = unknown> {
 
 ```typescript
 // Manager → Discovery
-const result = await discovery.run({
+const result = await runDiscovery({
   goal: "Learn how to find software engineer jobs in Seattle",
   context: {
-    startUrl: "linkedin.com/jobs",
-    criteria: { title: "Software Engineer", location: "Seattle" }
+    page,
+    llm,
+    apiKey,
+    goals: ["find job listings", "locate apply button"]
   }
 });
 // result: { goalCompleted: true, result: ExplorationResult }
 // or:     { goalCompleted: false, reason: "Login required" }
 
-// Discovery → DiscoveryAnalyzer
-const analysis = await discoveryAnalyzer.run({
+// Discovery → Analyzer
+const analysis = await runAnalyzer({
   goal: "Describe what changed after clicking job card",
   context: {
-    beforeScreenshot,
-    afterScreenshot,
-    action: "click job card"
+    apiKey,
+    action: "click job card",
+    beforeUrl, afterUrl,
+    beforeScreenshot, afterScreenshot
   }
 });
-// analysis: { goalCompleted: true, result: { summary, urlChanged } }
+// analysis: { goalCompleted: true, result: { summary, urlChanged, significantChange } }
 ```
 
 ---
@@ -198,19 +197,26 @@ Internally uses:
 ## File Structure
 
 ```
-explorer/
-├── manager.ts                    ─ Manager class (coordinates phases)
-├── discovery-loop.ts             ─ Discovery loop (Phase 1)
-├── agents/
-│   ├── discovery-agent.ts        ─ Per-step decision maker
-│   ├── discovery-analyzer.ts     ─ Visual diff after actions
-│   └── discovery-summarizer.ts   ─ Consolidates observations
-├── memory/
-│   ├── store.ts                  ─ MemoryStore class
-│   └── types.ts                  ─ PageNode, Edge, etc.
-├── types/
-│   └── handoff.ts                ─ HandoffInput/HandoffOutput contracts
-└── index.ts                      ─ Exports
+automation-core/
+├── explorer/
+│   ├── manager.ts                ─ Manager class (coordinates phases)
+│   └── index.ts                  ─ Exports
+│
+├── agents/discovery/
+│   ├── discovery-agent.ts        ─ Discovery loop + step decider (Phase 1)
+│   ├── analyzer-agent.ts         ─ Visual diff after actions
+│   ├── page-match-agent.ts       ─ Same-page detection (screenshot compare)
+│   ├── summarizer-agent.ts       ─ Consolidates observations
+│   ├── discover-event-log.ts     ─ Discovery event log (single source of truth)
+│   ├── memory/
+│   │   └── types.ts              ─ DiscoveryEvent + ExplorationResult
+│   ├── types/
+│   │   └── handoff.ts            ─ HandoffInput/HandoffOutput contracts
+│   └── index.ts                  ─ Exports
+│
+└── browser/
+    ├── page.ts                   ─ Page class (browser interface)
+    └── dom/service.ts            ─ DOM utilities
 ```
 
 ---
@@ -221,7 +227,7 @@ Discovery is an agent that runs its own exploration loop, coordinating sub-agent
 
 ### Entry Point
 
-Manager calls `runDiscoveryLoop()`. Located: `explorer/discovery-loop.ts`
+Manager calls `runDiscovery()`. Located: `agents/discovery/discovery-agent.ts`
 
 ```typescript
 interface DiscoveryContext {
@@ -235,7 +241,7 @@ interface DiscoveryContext {
 }
 
 // Called via handoff contract
-const result = await runDiscoveryLoop({
+const result = await runDiscovery({
   goal: "Learn how to find job listings",
   context: discoveryContext
 });
@@ -244,31 +250,31 @@ const result = await runDiscoveryLoop({
 ### Discovery Loop
 
 ```
-Discovery.run(task, goals)
+runDiscovery(task, goals)
     │
     ├── Initialize
     │     page.getState() → DOM + URL
-    │     memory.initializePage(pageId, task, url)
+    │     eventLog.setCurrent(pageKey) + record initial analyzer event
     │
     └── while (stepCount < maxSteps)
           │
-          ├── Discovery Agent decides: explore() or done()
-          │     (sees: task, goals, DOM, memory, action history)
+          ├── Step Decider decides: explore() or done()
+          │     (sees: task, goals, DOM, event-log summary, recent events)
           │
           ├── if done() → finishExploration()
-          │                 └── for each page: DiscoverySummarizer
+          │                 └── for each page: Summarizer
           │                 └── return ExplorationResult to Manager
           │
           └── if explore() → executeAndAnalyze()
                 │
                 ├── page.takeScreenshot() → before
-                ├── page.click/scroll()
+                ├── page.executeAction()
                 ├── page.takeScreenshot() → after
                 ├── page.getState() → new DOM
                 │
-                └── DiscoveryAnalyzer(before, after)
+                └── Analyzer + PageMatch
                       │
-                      └── memory.addObservation(summary)
+                      └── record analyzer/page-change event in log
 ```
 
 ### Handoff to Manager
@@ -285,9 +291,11 @@ Discovery ─── done() ──→ ExplorationResult ──→ Manager ──�
 
 Discovery coordinates two sub-agents. Each is a **single LLM call** with a goal.
 
-### DiscoveryAnalyzer
+### Analyzer
 
 **Role:** Describes what changed and whether the page/state fundamentally shifted.
+
+**Located:** `agents/discovery/analyzer-agent.ts`
 
 **Called by:** Discovery loop (after each action)
 
@@ -317,15 +325,41 @@ type DiscoveryAnalyzerResult = {
 type DiscoveryAnalyzerOutput = HandoffOutput<DiscoveryAnalyzerResult>;
 ```
 
+---
+
+### Page Match Agent
+
+Determines if two page states are the same page key using screenshots + URLs.
+
+```typescript
+type PageMatchContext = {
+  apiKey: string;
+  model?: string;
+  beforeUrl: string;
+  afterUrl: string;
+  beforeScreenshot: string;
+  afterScreenshot: string;
+};
+
+type PageMatchResult = {
+  isSamePage: boolean;
+  reason: string;
+};
+
+type PageMatchOutput = HandoffOutput<PageMatchResult>;
+```
+
 **Significant change** means the page's functional state changed enough that Discovery should treat it as a new step in the path. This can happen:
 - without URL change (SPA state swap, modal → full page, panel replaces list)
 - with URL change but still same component/state (e.g., pagination, filters)
 
 ---
 
-### DiscoverySummarizer
+### Summarizer
 
 **Role:** Consolidates observations into page understanding.
+
+**Located:** `agents/discovery/summarizer-agent.ts`
 
 **Called by:** Discovery loop (at finish, for each page)
 
@@ -333,7 +367,7 @@ type DiscoveryAnalyzerOutput = HandoffOutput<DiscoveryAnalyzerResult>;
 ```typescript
 type DiscoverySummarizerContext = {
   llm: BaseChatModel;
-  pageId: string;
+  pageKey: string;
   observations: string[];
   currentUnderstanding: string;
 };
@@ -344,6 +378,7 @@ type DiscoverySummarizerHandoff = HandoffInput<DiscoverySummarizerContext>;
 **Output:**
 ```typescript
 type DiscoverySummarizerResult = {
+  pageKey: string;
   summary: string;
 };
 
@@ -352,45 +387,41 @@ type DiscoverySummarizerOutput = HandoffOutput<DiscoverySummarizerResult>;
 
 ---
 
-## Discovery Agent
+## Step Decider (Internal)
 
-Located: `agents/discovery-agent.ts`
+Located: `agents/discovery/discovery-agent.ts` (internal function)
 
-Each step, the Discovery agent looks at context and decides: **explore** or **done**.
+Each step, the Step Decider looks at context and decides: **explore** or **done**.
 
 Uses Gemini with function calling:
-- Tools: `explore(action, target, reason)` and `done(understanding, key_elements)`
+- Tools: `explore(action, target, reason)` and `done(understanding)`
 - Mode: `FunctionCallingMode.ANY` (must call a tool)
 
-**Handoff (Manager → Discovery):**
+**Step Decider Context (internal):**
 ```typescript
-type DiscoveryContext = {
-  startUrl: string;
-  criteria?: Record<string, string>;
-  maxSteps?: number;
-};
-
-type DiscoveryHandoff = HandoffInput<DiscoveryContext>;
-```
-
-**Per-Step Context (internal):**
-```typescript
-type DiscoveryStepContext = {
-  goal: string;           // inherited from handoff
+interface DiscoveryAgentContext {
+  apiKey: string;
+  model?: string;
+  task: string;
+  goals?: string[];
   currentDom: string;
   memorySummary: string;
-  actionHistory: string[];
-  confirmedPatternCount: number;
-};
+  actionHistory: DiscoveryEvent[];
+}
 ```
 
 **Agent Output:**
 ```typescript
-type DiscoveryDecision =
+type DiscoveryAction =
   | { type: 'explore'; action: 'click' | 'scroll_down' | 'scroll_up'; target?: string; reason: string }
-  | { type: 'done'; understanding: string; keyElements: Record<string, string | string[]> };
+  | { type: 'done'; understanding: string };
 
-type DiscoveryOutput = HandoffOutput<ExplorationResult>;
+interface DiscoveryDecision {
+  action: DiscoveryAction;
+}
+
+// Step Decider returns
+type StepDeciderOutput = HandoffOutput<DiscoveryDecision>;
 ```
 
 ---
@@ -402,41 +433,37 @@ type DiscoveryOutput = HandoffOutput<ExplorationResult>;
 ```
 Step N:
 ┌─────────────────────────────────────────────────────────────────┐
-│ Discovery Loop                                                  │
+│ Discovery Loop (discovery-agent.ts)                             │
 │   │                                                             │
-│   ├─→ Discovery Agent (Gemini function call)                    │
-│   │     input: task, goals, DOM, memory, history                │
+│   ├─→ Step Decider (Gemini function call)                       │
+│   │     input: task, goals, DOM, event-log summary, recent events│
 │   │     output: explore(click, "#btn", "why") or done()         │
 │   │                                                             │
 │   ├─→ page.takeScreenshot() → beforeScreenshot                  │
-│   ├─→ page.clickSelector("#btn")                                │
+│   ├─→ page.executeAction({ action: "click", target: "#btn" })   │
 │   ├─→ page.takeScreenshot() → afterScreenshot                   │
 │   ├─→ page.getState() → newDom, newUrl                          │
 │   │                                                             │
-│   ├─→ Analyzer(action, before, after, urls)                     │
+│   ├─→ Analyzer + PageMatch                                      │
 │   │     └── returns: { summary, urlChanged, significantChange } │
 │   │                                                             │
-│   ├─→ actionHistory.push(`click "#btn" → ${summary}`)           │
-│   └─→ memory.addObservation(summary)                            │
+│   └─→ record analyzer/page-change event in log                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ### Finish Flow
 
 ```
-Discovery decides done():
+Step Decider decides done():
 ┌─────────────────────────────────────────────────────────────────┐
-│ Discovery.finishExploration()                                   │
+│ finishExploration() in discovery-agent.ts                       │
 │   │                                                             │
-│   ├─→ for each pageId in memory.getPageIds():                   │
-│   │     └─→ Summarizer(llm, pageId, observations, current)      │
-│   │           └── memory.updatePageSummary(pageId, summary)     │
-│   │                                                             │
-│   ├─→ mergedKeyElements = { ...discovered, ...decision.keyElems}│
+│   ├─→ for each pageKey in event log:                            │
+│   │     └─→ Summarizer(llm, pageKey, observations)              │
+│   │           └── record summarizer event                       │
 │   │                                                             │
 │   └─→ return ExplorationResult to Manager                       │
-│         { success, pages, navigationPath, finalUnderstanding,   │
-│           keyElements }                                         │
+│         { success, pageKeys, events, finalUnderstanding }       │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -447,8 +474,8 @@ Discovery decides done():
 │ Manager  │ ─── run Discovery ──→│ Discovery Loop              │
 └──────────┘                      │   ├── Agent decides         │
      ▲                            │   ├── Page.execute()        │
-     │                            │   ├── Analyzer              │
-     │                            │   └── Memory.addObservation │
+     │                            │   ├── Analyzer/PageMatch    │
+     │                            │   └── Record event          │
      │                            │                             │
      │                            │   ... repeats until done    │
      │                            │                             │
@@ -460,121 +487,19 @@ Discovery decides done():
 
 ---
 
-## Discovery Memory (Detail)
+## Discovery State (Detail)
 
-Discovery's memory holds the learned page graph and exploration state.
-
-### Memory Operations
+Discovery’s state is a single `DiscoverEventLog`.
 
 ```typescript
-class DiscoveryMemory {
-  // Initialization
-  initializePage(pageId: string, task: string, url: string): void;
-  
-  // Recording
-  addObservation(observation: string): void;
-  addBehaviorPattern(pattern: BehaviorPatternInput): void;
-  updatePageSummary(pageId: string, summary: string): void;
-  updateFromClassification(result: ClassifierResult): void;
-  
-  // Querying
-  getSummary(): string;
-  getConfirmedPatternCount(): number;
-  getPage(pageId: string): PageNode | undefined;
-  getAllPages(): Map<string, PageNode>;
-  getNavigationPath(): string[];
+interface DiscoverEventLog {
+  events: DiscoveryEvent[];      // event log
+  currentPageKey: string | null; // for tagging events
 }
 ```
 
 ---
-
-### PageNode
-
-```typescript
-interface PageNode {
-  id: string;                     // "homepage", "job_search"
-  understanding: string;          // summarized understanding
-  rawObservations: string[];      // collected before summarization (deprecated, for compat)
-  patterns: BehaviorPattern[];    // consolidated behavior patterns
-  incomingEdges: Edge[];          // how to reach this page
-  outgoingEdges: Edge[];          // where you can go from here
-  visitCount: number;             // times visited
-  lastVisitedAt: number;          // timestamp
-  lastUrl: string;                // last URL seen for this page type
-}
-```
-
----
-
-### Edge
-
-```typescript
-interface Edge {
-  fromPageId: string;
-  toPageId: string;
-  action: string;        // "clicked Jobs nav link"
-  selector?: string;     // the actual selector used
-}
-```
-
----
-
-### BehaviorPattern
-
-Consolidated from repeated observations. Pattern is `confirmed` after 2+ observations.
-
-```typescript
-interface BehaviorPattern {
-  id: string;                     // unique pattern id (generated)
-  action: string;                 // "click", "scroll", etc.
-  targetDescription: string;      // "job listing", "filter button"
-  effect: string;                 // "updates details panel", "opens modal"
-  changeType: string;             // from Analyzer: "content_loaded", "navigation", etc.
-  selectors: string[];            // example selectors that trigger this (max 3)
-  count: number;                  // how many times observed
-  confirmed: boolean;             // true if count >= 2 (pattern is reliable)
-  firstSeen: number;              // timestamp
-}
-```
-
----
-
-### ClassifierResult
-
-Used for page classification when URL changes.
-
-```typescript
-interface ClassifierResult {
-  pageId: string;
-  isNewPage: boolean;
-  isSamePage: boolean;
-  understanding: string;
-  cameFrom?: string;
-  viaAction?: string;
-}
-```
-
-Called in `discovery-loop.ts` when URL changes to create new PageNodes and Edges.
-
----
-
-### KeyElements
-
-Discovered selectors by semantic type. Merged from MemoryStore patterns + Manager's `done()` output.
-
-```typescript
-interface KeyElements {
-  filter_button?: string;
-  apply_button?: string;
-  job_listings?: string[];
-  search_input?: string;
-  pagination?: string;
-  close_button?: string;
-  [key: string]: string | string[] | undefined;
-}
-```
-
----
+Key elements were removed from the Discovery output.
 
 ### ExplorationResult
 
@@ -582,10 +507,11 @@ Final payload from Phase 1 Discovery:
 
 ```typescript
 interface ExplorationResult {
-  pages: Map<string, PageNode>;
-  navigationPath: string[];
+  success: boolean;
+  pageKeys: string[];
+  events: DiscoveryEvent[];
   finalUnderstanding: string;
-  keyElements?: KeyElements;
+  error?: string;
 }
 ```
 
@@ -593,10 +519,10 @@ interface ExplorationResult {
 
 ## Multi-Page Navigation
 
-When URL changes, Discovery creates a new PageNode and links it:
-1. Classify page identity (URL-based for now)
-2. Call `memory.updateFromClassification()` to create/update PageNode
-3. Add Edge from previous page
+When URL changes, Discovery resolves the page key:
+1. Page Match Agent compares screenshots vs existing pages
+2. If match: reuse page key; else create new key with LLM id
+3. Record `fromPageKey`/`toPageKey` on the page-change event and switch current page key
 
 ---
 
@@ -642,10 +568,10 @@ type Step = {
 
 1. Execute action via Page
 2. Observe via Analyzer
-3. Record in MemoryStore
+3. Record event in event log (sub-agent outputs + URLs + screenshots)
 4. After 2+ observations of same pattern → `confirmed: true`
 
-Confirmed patterns are reliable for recipe generation.
+Navigation links are reliable for recipe generation.
 
 ---
 
@@ -667,7 +593,7 @@ Confirmed patterns are reliable for recipe generation.
 - **Manager** coordinates phases (calls Discovery, then Composer)
   - Has its own memory (task, goals, phase results)
 - **Discovery** runs its own loop:
-  - Has its own memory (PageNodes, Edges, Patterns, actionHistory)
+  - Has its own memory (DiscoverEventLog with events + currentPageKey)
   - Agent decides explore/done each step
   - **Analyzer** — visual diff (stateless)
   - **Summarizer** — consolidates observations (stateless)
@@ -676,13 +602,13 @@ Confirmed patterns are reliable for recipe generation.
 
 ```
 Manager
-  └─→ Discovery.run(task, goals)
+  └─→ runDiscovery(task, goals)
         │
         └── Discovery Loop (many steps)
-              ├── Agent decides → explore/done
-              ├── Page.execute()
-              ├── Analyzer → summary
-              └── Memory.addObservation()
+              ├── Step Decider → explore/done
+              ├── Page.executeAction()
+              ├── Analyzer + PageMatch
+              └── Record event to DiscoverEventLog
         │
         └── Summarizer (per page)
         │
@@ -699,4 +625,4 @@ Manager
 
 ### Multi-Page Wiring
 
-URL changes now produce new PageNodes and Edges via `updateFromClassification()`.
+URL changes now produce new page keys and event-log entries via page-change events.

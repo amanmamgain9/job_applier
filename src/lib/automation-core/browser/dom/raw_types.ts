@@ -62,6 +62,25 @@ export interface BuildDomTreeResult {
   rootId: string;
   map: Record<string, RawDomTreeNode>;
   perfMetrics?: PerfMetrics;
+  buildDomTreeVersion?: string;
+  scrollDiagnostics?: Array<{
+    tagName: string | null;
+    id: string | null;
+    className: string | null;
+    role: string | null;
+    overflowY: string;
+    overflow: string;
+    scrollHeight: number;
+    clientHeight: number;
+    scrollWidth: number;
+    clientWidth: number;
+    hasOverflow: boolean;
+    hasScrollableContent: boolean;
+    hasMinSize?: boolean;
+    isScrollable: boolean;
+    scrollFailReasons?: string[];
+    xpath: string;
+  }>;
 }
 
 declare global {

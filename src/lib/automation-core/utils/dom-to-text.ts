@@ -83,14 +83,20 @@ export function buildSelector(node: DOMElementNode): string {
     return `${node.tagName}[aria-label="${label}"]`;
   }
   
-  // Use class (first meaningful one)
+    // Use class (first meaningful one)
   if (attributes.class) {
-    const classes = String(attributes.class).split(' ').filter(c => 
-      c.length > 2 && !c.includes('--') && !c.match(/^[a-z]{1,2}$/)
-    );
+      const classes = String(attributes.class)
+        .split(/\s+/)
+        .map(c => c.trim())
+        .filter(c => c.length > 2 && !c.includes('--') && !c.match(/^[a-z]{1,2}$/));
     if (classes.length > 0) {
       return `${node.tagName}.${classes[0]}`;
     }
+  }
+
+  // Scrollable container fallback
+  if (attributes['data-scrollable']) {
+    return `${node.tagName}[data-scrollable="true"]`;
   }
   
   return node.tagName || 'div';
@@ -152,8 +158,8 @@ export function domTreeToString(
     // Check if entering boilerplate section
     const isBoilerplate = inBoilerplate || isBoilerplateContainer(node);
     
-    // For boilerplate sections, only show interactive elements
-    if (isBoilerplate && !node.isInteractive) {
+    // For boilerplate sections, only show interactive or scrollable elements
+    if (isBoilerplate && !node.isInteractive && !attributes['data-scrollable']) {
       // Still recurse to find interactive children
       if (node.children) {
         for (const child of node.children) {
@@ -208,6 +214,12 @@ export function domTreeToString(
       } else {
         parts.push(`[CLICKABLE${interactionDesc}]`);
       }
+    }
+
+    // Mark scrollable containers with selector to use for scrolling
+    if (attributes['data-scrollable'] && includeSelectors) {
+      const selector = buildSelector(node);
+      parts.push(`[SCROLL: "${selector}"]`);
     }
     
     result += `${spaces}${parts.join(' ')}\n`;

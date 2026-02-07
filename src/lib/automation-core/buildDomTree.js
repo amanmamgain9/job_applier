@@ -14,6 +14,7 @@ window.buildDomTree = (
   const doHighlightElements = true;
 
   let highlightIndex = startHighlightIndex; // Reset highlight index
+  let scrollHighlightIndex = 0;
 
   // Add caching mechanisms at the top level
   const DOM_CACHE = {
@@ -96,6 +97,9 @@ window.buildDomTree = (
    * @type {Object<string, any>}
    */
   const DOM_HASH_MAP = {};
+  const BUILD_DOM_TREE_VERSION = 'scroll-diag-v2';
+  window.buildDomTreeVersion = BUILD_DOM_TREE_VERSION;
+  const scrollDiagnostics = [];
 
   const ID = { current: startId };
 
@@ -348,6 +352,85 @@ window.buildDomTree = (
         (window._highlightCleanupFunctions = window._highlightCleanupFunctions || []).push(cleanupFn);
       }
     }
+  }
+
+  /**
+   * Lightly highlight a scrollable container for visual debugging.
+   * This does not assign a highlight index or label.
+   *
+   * @param {HTMLElement} element - The scrollable element to highlight.
+   * @param {HTMLElement | null} parentIframe - The parent iframe node.
+   */
+  function highlightScrollableElement(element, parentIframe = null) {
+    if (!element || !showHighlightElements) return;
+    try {
+      let container = document.getElementById(HIGHLIGHT_CONTAINER_ID);
+      if (!container) {
+        container = document.createElement('div');
+        container.id = HIGHLIGHT_CONTAINER_ID;
+        container.style.position = 'fixed';
+        container.style.pointerEvents = 'none';
+        container.style.top = '0';
+        container.style.left = '0';
+        container.style.width = '100%';
+        container.style.height = '100%';
+        container.style.zIndex = '2147483647';
+        container.style.backgroundColor = 'transparent';
+        container.style.display = showHighlightElements ? 'block' : 'none';
+        document.body.appendChild(container);
+      }
+
+      const rect = element.getBoundingClientRect();
+      if (!rect || rect.width === 0 || rect.height === 0) return;
+
+      const overlay = document.createElement('div');
+      overlay.style.position = 'fixed';
+      overlay.style.border = '1px solid rgba(66, 153, 225, 0.6)';
+      overlay.style.backgroundColor = 'rgba(66, 153, 225, 0.08)';
+      overlay.style.pointerEvents = 'none';
+      overlay.style.boxSizing = 'border-box';
+
+      const label = document.createElement('div');
+      const labelChar = String.fromCharCode(65 + (scrollHighlightIndex % 26));
+      scrollHighlightIndex += 1;
+      label.className = 'playwright-highlight-label';
+      label.style.position = 'fixed';
+      label.style.background = 'rgba(66, 153, 225, 0.85)';
+      label.style.color = 'white';
+      label.style.padding = '1px 4px';
+      label.style.borderRadius = '4px';
+      label.style.fontSize = '10px';
+      label.textContent = labelChar;
+
+      let iframeOffset = { x: 0, y: 0 };
+      if (parentIframe) {
+        const iframeRect = parentIframe.getBoundingClientRect();
+        iframeOffset.x = iframeRect.left;
+        iframeOffset.y = iframeRect.top;
+      }
+
+      overlay.style.top = `${rect.top + iframeOffset.y}px`;
+      overlay.style.left = `${rect.left + iframeOffset.x}px`;
+      overlay.style.width = `${rect.width}px`;
+      overlay.style.height = `${rect.height}px`;
+      container.appendChild(overlay);
+
+      const labelTop = Math.max(0, rect.top + iframeOffset.y + 2);
+      const labelLeft = Math.max(0, rect.left + iframeOffset.x + 2);
+      label.style.top = `${labelTop}px`;
+      label.style.left = `${labelLeft}px`;
+      container.appendChild(label);
+    } catch {
+      // Best-effort visual aid; ignore failures.
+    }
+  }
+
+  function getScrollFailReasons(hasOverflow, hasScrollableContent, hasMinSize) {
+    const reasons = [];
+    if (!hasOverflow) reasons.push('no-overflow');
+    if (!hasScrollableContent) reasons.push('no-scrollable-content');
+    if (!hasMinSize) reasons.push('small-box');
+    return reasons;
   }
 
   // // Add this function to perform cleanup when needed
@@ -1272,6 +1355,53 @@ window.buildDomTree = (
         children: [],
       };
 
+      const bodyStyle = getCachedComputedStyle(node);
+      const bodyOverflowY = bodyStyle?.overflowY || '';
+      const bodyOverflow = bodyStyle?.overflow || '';
+      const bodyHasOverflow =
+        bodyOverflowY === 'auto' ||
+        bodyOverflowY === 'scroll' ||
+        bodyOverflowY === 'overlay' ||
+        bodyOverflow === 'auto' ||
+        bodyOverflow === 'scroll' ||
+        bodyOverflow === 'overlay';
+      const bodyHasMinSize = node.clientHeight > 80 && node.clientWidth > 80;
+      const bodyScrollable =
+        (node.scrollHeight > node.clientHeight + 10 ||
+          document.documentElement?.scrollHeight > document.documentElement?.clientHeight + 10) &&
+        bodyHasMinSize &&
+        (bodyHasOverflow || node === document.body);
+      if (bodyScrollable) {
+        nodeData.attributes['data-scrollable'] = 'true';
+      }
+      if (debugMode) {
+        scrollDiagnostics.push({
+          tagName: 'body',
+          id: node.id || null,
+          className: node.className || null,
+          role: node.getAttribute?.('role') || null,
+          overflowY: bodyOverflowY,
+          overflow: bodyOverflow,
+          scrollHeight: node.scrollHeight,
+          clientHeight: node.clientHeight,
+          scrollWidth: node.scrollWidth,
+          clientWidth: node.clientWidth,
+          hasOverflow: bodyHasOverflow,
+          hasScrollableContent:
+            node.scrollHeight > node.clientHeight + 10 ||
+            document.documentElement?.scrollHeight > document.documentElement?.clientHeight + 10,
+          hasMinSize: bodyHasMinSize,
+          isScrollable: bodyScrollable,
+          scrollFailReasons: getScrollFailReasons(
+            bodyHasOverflow,
+            node.scrollHeight > node.clientHeight + 10 ||
+              document.documentElement?.scrollHeight > document.documentElement?.clientHeight + 10,
+            bodyHasMinSize,
+          ),
+          xpath: '/body',
+        });
+      }
+
       // Process children of body
       for (const child of Array.from(node.childNodes)) {
         const domElement = buildDomTree(child, parentIframe, false, depth + 1); // Body's children have no highlighted parent initially
@@ -1366,9 +1496,44 @@ window.buildDomTree = (
       children: [],
     };
 
+    const style = getCachedComputedStyle(node);
+    const overflowY = style?.overflowY || '';
+    const overflow = style?.overflow || '';
+    const hasOverflow =
+      overflowY === 'auto' ||
+      overflowY === 'scroll' ||
+      overflowY === 'overlay' ||
+      overflow === 'auto' ||
+      overflow === 'scroll' ||
+      overflow === 'overlay';
+    const hasMinSize = node.clientHeight > 80 && node.clientWidth > 80;
+    const hasScrollableContent = node.scrollHeight > node.clientHeight + 10;
+    const isScrollable = hasScrollableContent && hasMinSize && (hasOverflow || node === document.documentElement);
+    if (debugMode && (hasOverflow || hasScrollableContent || isScrollable)) {
+      scrollDiagnostics.push({
+        tagName: node.tagName?.toLowerCase() || null,
+        id: node.id || null,
+        className: node.className || null,
+        role: node.getAttribute?.('role') || null,
+        overflowY,
+        overflow,
+        scrollHeight: node.scrollHeight,
+        clientHeight: node.clientHeight,
+        scrollWidth: node.scrollWidth,
+        clientWidth: node.clientWidth,
+        hasOverflow,
+        hasScrollableContent,
+        hasMinSize,
+        isScrollable,
+        scrollFailReasons: getScrollFailReasons(hasOverflow, hasScrollableContent, hasMinSize),
+        xpath: getXPathTree(node, true),
+      });
+    }
+
     // Get attributes for interactive elements or potential text containers
     if (
       isInteractiveCandidate(node) ||
+      isScrollable ||
       node.tagName.toLowerCase() === 'iframe' ||
       node.tagName.toLowerCase() === 'body'
     ) {
@@ -1377,6 +1542,11 @@ window.buildDomTree = (
         const value = node.getAttribute(name);
         nodeData.attributes[name] = value;
       }
+    }
+
+    if (isScrollable) {
+      nodeData.attributes['data-scrollable'] = 'true';
+      highlightScrollableElement(node, parentIframe);
     }
 
     let nodeWasHighlighted = false;
@@ -1501,5 +1671,10 @@ window.buildDomTree = (
   // Clear the cache before starting
   DOM_CACHE.clearCache();
 
-  return { rootId, map: DOM_HASH_MAP };
+  return {
+    rootId,
+    map: DOM_HASH_MAP,
+    scrollDiagnostics: debugMode ? scrollDiagnostics : undefined,
+    buildDomTreeVersion: BUILD_DOM_TREE_VERSION,
+  };
 };
