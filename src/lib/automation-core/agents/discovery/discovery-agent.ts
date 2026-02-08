@@ -456,6 +456,13 @@ export async function runDiscovery(
     const initialAnalysis = await analyzeInitialPage(
       page, currentUrl, goal, apiKey, model, initialScreenshot, report
     );
+    const initialLlmCalls: Array<{
+      agent: 'analyzer' | 'page_match' | 'page_id';
+      goal: string;
+      model?: string;
+      durationMs?: number;
+      output: HandoffOutput<unknown>;
+    }> = [];
     const pageKeyResult = await runPageChangeAnalysis({
       goal: 'Generate a stable page id for the initial page',
       context: {
@@ -468,17 +475,36 @@ export async function runDiscovery(
         afterScreenshot: initialScreenshot,
         domSample: currentDom,
         existingPages: [],
+        onLlmCall: (event) => {
+          initialLlmCalls.push(event);
+        },
       },
     });
     const pageKey = pageKeyResult.result?.pageKey || currentUrl.replace(/[^a-zA-Z0-9]+/g, '_');
     eventLog.setCurrent(pageKey);
+    for (const call of initialLlmCalls) {
+      eventLog.addLlmCallEvent(call.output, {
+        agent: call.agent,
+        goal: call.goal,
+        model: call.model,
+        durationMs: call.durationMs,
+      });
+    }
+    const initialSnapshotId = eventLog.setSnapshot(pageKey, currentUrl, initialScreenshot) ?? undefined;
     if (initialAnalysis.analyzerResult) {
       eventLog.addAnalyzerEvent(initialAnalysis.analyzerResult, {
         beforeUrl: currentUrl,
         afterUrl: currentUrl,
+        beforeSnapshotId: initialSnapshotId,
+        afterSnapshotId: initialSnapshotId,
+      });
+      eventLog.addLlmCallEvent(initialAnalysis.analyzerResult, {
+        agent: 'analyzer',
+        goal: initialAnalysis.analyzerGoal,
+        model: initialAnalysis.analyzerModel,
+        durationMs: initialAnalysis.analyzerDurationMs,
       });
     }
-    eventLog.setSnapshot(pageKey, currentUrl, initialScreenshot);
 
     // Main loop
     while (stepCount < maxSteps) {
@@ -547,14 +573,23 @@ async function analyzeInitialPage(
   model: string | undefined,
   screenshot: string | null,
   report?: ReportService
-): Promise<{ understanding: string; analyzerResult?: HandoffOutput<DiscoveryAnalyzerResult> }> {
+): Promise<{
+  understanding: string;
+  analyzerResult?: HandoffOutput<DiscoveryAnalyzerResult>;
+  analyzerGoal: string;
+  analyzerModel: string;
+  analyzerDurationMs?: number;
+}> {
   report?.log(`[Analyzing initial page...]`);
   
   try {
     const initialShot = screenshot ?? await page.takeScreenshot();
     assertScreenshot(initialShot, 'initial analysis');
+    const analyzerGoal = 'Describe this page: what it is, what can be done here, any blockers (login, captcha)';
+    const analyzerModel = model ?? 'gemini-3-flash-preview';
+    const analyzerStart = Date.now();
     const result = await runAnalyzer({
-      goal: 'Describe this page: what it is, what can be done here, any blockers (login, captcha)',
+      goal: analyzerGoal,
       context: {
         apiKey,
         model,
@@ -565,17 +600,35 @@ async function analyzeInitialPage(
         afterScreenshot: initialShot,
       },
     });
+    const analyzerDurationMs = Date.now() - analyzerStart;
     
     if (result.goalCompleted && result.result) {
       const understanding = result.result.summary;
       report?.log(`[Initial] ${understanding}`);
-      return { understanding, analyzerResult: result };
+      return {
+        understanding,
+        analyzerResult: result,
+        analyzerGoal,
+        analyzerModel,
+        analyzerDurationMs,
+      };
     }
+    return {
+      understanding: fallbackGoal,
+      analyzerResult: result,
+      analyzerGoal,
+      analyzerModel,
+      analyzerDurationMs,
+    };
   } catch {
     logger.warning('Initial page analysis failed');
   }
   
-  return { understanding: fallbackGoal };
+  return {
+    understanding: fallbackGoal,
+    analyzerGoal: 'Describe this page: what it is, what can be done here, any blockers (login, captcha)',
+    analyzerModel: model ?? 'gemini-3-flash-preview',
+  };
 }
 
 // ============================================================================
@@ -601,6 +654,7 @@ async function getDiscoveryDecision(
     assertScreenshot(decisionScreenshot, 'step decider');
     const clickLabelData = buildClickLabelData(decisionState.selectorMap);
     const clickLabelLines = clickLabelData.lines;
+    const stepDeciderStart = Date.now();
     const decision = await runStepDecider({
       apiKey,
       model,
@@ -612,6 +666,19 @@ async function getDiscoveryDecision(
       memorySummary: eventLog.buildSummary(),
       actionHistory,
     });
+    eventLog.addLlmCallEvent(
+      {
+        goalCompleted: Boolean(decision),
+        result: decision ?? undefined,
+        reason: decision ? undefined : 'No decision',
+      },
+      {
+        agent: 'step_decider',
+        goal: task,
+        model: model ?? 'gemini-2.0-flash',
+        durationMs: Date.now() - stepDeciderStart,
+      }
+    );
     
     if (!decision) {
       report?.log(`[Error] No decision`);
@@ -656,7 +723,15 @@ async function executeAndAnalyze(
 
   const beforeScreenshot = await page.takeScreenshot();
   assertScreenshot(beforeScreenshot, 'before action');
+  let reportActionStarted = false;
+  if (report) {
+    report.startAction(`Discovery ${action.action}`, action.target);
+    reportActionStarted = true;
+  }
   const execResult = await page.executeAction(action);
+  if (reportActionStarted) {
+    report.endAction(execResult.success, execResult.success ? undefined : execResult.description);
+  }
   eventLog.addActionEvent({
     goalCompleted: execResult.success,
     result: {
@@ -720,12 +795,21 @@ async function finishExploration(
       .getEventsForPage(pageKey)
       .map((event) => JSON.stringify(event));
     if (observations.length > 0) {
+      const summarizerStart = Date.now();
       const result = await runSummarizer({
         goal: `Consolidate observations for page: ${pageKey}`,
         context: { llm, pageKey, observations, currentUnderstanding: '' },
       });
       
       eventLog.addSummarizerEvent(result);
+      eventLog.addLlmCallEvent(result, {
+        agent: 'summarizer',
+        goal: `Consolidate observations for page: ${pageKey}`,
+        model: (llm as { modelName?: string; model?: string }).modelName
+          || (llm as { modelName?: string; model?: string }).model
+          || undefined,
+        durationMs: Date.now() - summarizerStart,
+      });
     }
   }
   

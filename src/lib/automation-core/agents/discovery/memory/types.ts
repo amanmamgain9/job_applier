@@ -33,11 +33,18 @@ export type DiscoveryEventInput =
   | { kind: 'decision'; output: HandoffOutput<DiscoveryDecision> }
   | { kind: 'action'; output: HandoffOutput<DiscoveryActionResult> }
   | {
+      kind: 'llm_call';
+      output: HandoffOutput<unknown>;
+      meta: LlmCallMeta;
+    }
+  | {
       kind: 'analyzer';
       output: HandoffOutput<DiscoveryAnalyzerResult>;
       meta: {
         beforeUrl: string;
         afterUrl: string;
+        beforeSnapshotId?: string;
+        afterSnapshotId?: string;
       };
     }
   | {
@@ -48,6 +55,8 @@ export type DiscoveryEventInput =
         afterUrl: string;
         fromPageKey?: string;
         toPageKey?: string;
+        beforeSnapshotId?: string;
+        afterSnapshotId?: string;
       };
     }
   | { kind: 'summarizer'; output: HandoffOutput<DiscoverySummarizerResult> };
@@ -56,6 +65,20 @@ export type DiscoveryEvent = DiscoveryEventInput & {
   pageKey: string;
   timestamp: number;
 };
+
+export type LlmCallAgent =
+  | 'step_decider'
+  | 'analyzer'
+  | 'page_match'
+  | 'summarizer'
+  | 'page_id';
+
+export interface LlmCallMeta {
+  agent: LlmCallAgent;
+  goal: string;
+  model?: string;
+  durationMs?: number;
+}
 
 export interface ExplorationResult {
   success: boolean;

@@ -88,8 +88,14 @@ interface DiscoverEventLog {
 ```
 
 **What Discovery saves:**
-- Event log (all sub-agent outputs + URLs + screenshots inside analyzer/page-change events)
+- Event log (decisions, actions, LLM calls, analyzer/summarizer outputs, page_change rollups)
+- Snapshot store (screenshots saved separately; events carry snapshot IDs)
 - Current page key (for tagging events)
+
+**Event kinds (high level):**
+- `llm_call` — every LLM call (step decider, analyzer, page match, page id, summarizer)
+- `page_change` — rollup of post-action analysis (analyzer result + page key resolution)
+- `analyzer` — initial page analysis (baseline)
 
 ---
 
@@ -104,6 +110,7 @@ Sub-agents are currently **stateless** — they take input and return output wit
 | Summarizer | `agents/discovery/summarizer-agent.ts` | Stateless |
 
 Discovery records sub-agent outputs as events in the event log.
+Each LLM call is also logged as a `llm_call` event for debugging.
 
 ---
 
@@ -498,6 +505,8 @@ interface DiscoverEventLog {
 }
 ```
 
+Screenshots are stored separately and referenced by `snapshotId` in event metadata.
+
 ---
 Key elements were removed from the Discovery output.
 
@@ -522,7 +531,7 @@ interface ExplorationResult {
 When URL changes, Discovery resolves the page key:
 1. Page Match Agent compares screenshots vs existing pages
 2. If match: reuse page key; else create new key with LLM id
-3. Record `fromPageKey`/`toPageKey` on the page-change event and switch current page key
+3. Record `fromPageKey`/`toPageKey` + snapshot IDs on the page_change rollup and switch current page key
 
 ---
 
@@ -568,7 +577,7 @@ type Step = {
 
 1. Execute action via Page
 2. Observe via Analyzer
-3. Record event in event log (sub-agent outputs + URLs + screenshots)
+3. Record event in event log (sub-agent outputs + URLs + snapshot IDs)
 4. After 2+ observations of same pattern → `confirmed: true`
 
 Navigation links are reliable for recipe generation.

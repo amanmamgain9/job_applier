@@ -48,7 +48,9 @@ export interface PageChangeContext {
     pageKey: string;
     lastUrl: string;
     screenshot: string;
+    snapshotId: string;
   }>;
+  onLlmCall?: (event: PageChangeLlmCallEvent) => void;
 }
 
 export interface PageChangeResult {
@@ -71,13 +73,24 @@ export interface PageChangeEventLog {
   getEventsForPage(pageKey: string): PageChangeLogEvent[];
   getCurrentPageKey(): string | null;
   setCurrent(pageKey: string): void;
-  getSnapshots(): Array<{ pageKey: string; lastUrl: string; screenshot: string }>;
-  setSnapshot(pageKey: string, url: string, screenshot: string | null): void;
+  getSnapshots(): Array<{ pageKey: string; lastUrl: string; screenshot: string; snapshotId: string }>;
+  setSnapshot(pageKey: string, url: string, screenshot: string | null): string | null;
+  addLlmCallEvent(
+    output: HandoffOutput<unknown>,
+    meta: {
+      agent: 'analyzer' | 'page_match' | 'page_id';
+      goal: string;
+      model?: string;
+      durationMs?: number;
+    }
+  ): void;
   addAnalyzerEvent(
     output: HandoffOutput<DiscoveryAnalyzerResult>,
     meta: {
       beforeUrl: string;
       afterUrl: string;
+      beforeSnapshotId?: string;
+      afterSnapshotId?: string;
     }
   ): void;
   addPageChangeEvent(
@@ -87,9 +100,19 @@ export interface PageChangeEventLog {
       afterUrl: string;
       fromPageKey?: string;
       toPageKey?: string;
+      beforeSnapshotId?: string;
+      afterSnapshotId?: string;
     }
   ): void;
 }
+
+type PageChangeLlmCallEvent = {
+  agent: 'analyzer' | 'page_match' | 'page_id';
+  goal: string;
+  model?: string;
+  durationMs?: number;
+  output: HandoffOutput<unknown>;
+};
 
 
 // ============================================================================
@@ -216,11 +239,20 @@ export async function runPageChangeAnalysis(
     afterScreenshot,
     domSample,
     existingPages,
+    onLlmCall,
   } = context;
 
+  const analyzerStart = Date.now();
   const analysisResult = await runAnalyzer({
     goal,
     context: { apiKey, model, action, beforeUrl, afterUrl, beforeScreenshot, afterScreenshot },
+  });
+  onLlmCall?.({
+    agent: 'analyzer',
+    goal,
+    model: model ?? 'gemini-3-flash-preview',
+    durationMs: Date.now() - analyzerStart,
+    output: analysisResult,
   });
 
   if (!analysisResult.goalCompleted || !analysisResult.result) {
@@ -248,6 +280,7 @@ export async function runPageChangeAnalysis(
   }
 
   for (const candidate of existingPages) {
+    const matchStart = Date.now();
     const match = await runPageMatch({
       goal: `Is this the same page as ${candidate.pageKey}?`,
       context: {
@@ -258,6 +291,13 @@ export async function runPageChangeAnalysis(
         beforeScreenshot: candidate.screenshot,
         afterScreenshot,
       },
+    });
+    onLlmCall?.({
+      agent: 'page_match',
+      goal: `Is this the same page as ${candidate.pageKey}?`,
+      model: model ?? 'gemini-3-flash-preview',
+      durationMs: Date.now() - matchStart,
+      output: match,
     });
 
     if (match.goalCompleted && match.result?.isSamePage) {
@@ -272,6 +312,7 @@ export async function runPageChangeAnalysis(
     }
   }
 
+  const pageIdStart = Date.now();
   const newPageId = await buildPageIdWithLlm({
     apiKey,
     model,
@@ -280,6 +321,13 @@ export async function runPageChangeAnalysis(
     summary: analysis.summary,
     beforeScreenshot,
     afterScreenshot,
+  });
+  onLlmCall?.({
+    agent: 'page_id',
+    goal: 'Generate stable page id',
+    model: model ?? 'gemini-3-flash-preview',
+    durationMs: Date.now() - pageIdStart,
+    output: { goalCompleted: true, result: newPageId },
   });
 
   return {
@@ -335,6 +383,14 @@ export async function analyzeAndRecordPageChange(input: {
         afterScreenshot,
         domSample: afterDom,
         existingPages,
+        onLlmCall: (event) => {
+          eventLog.addLlmCallEvent(event.output, {
+            agent: event.agent,
+            goal: event.goal,
+            model: event.model,
+            durationMs: event.durationMs,
+          });
+        },
       },
     });
 
@@ -355,27 +411,36 @@ export async function analyzeAndRecordPageChange(input: {
       ? (matchedPageKey || pageChange.pageKey || afterUrl.replace(/[^a-zA-Z0-9]+/g, '_'))
       : undefined;
 
+    const beforeSnapshotId = fromPageKey
+      ? eventLog.setSnapshot(fromPageKey, beforeUrl, beforeScreenshot) ?? undefined
+      : undefined;
+    let afterSnapshotId: string | undefined;
+    if (analysis.urlChanged) {
+      const nextKey = resolvedPageKey || afterUrl.replace(/[^a-zA-Z0-9]+/g, '_');
+      afterSnapshotId = eventLog.setSnapshot(nextKey, afterUrl, afterScreenshot) ?? undefined;
+    } else if (fromPageKey) {
+      afterSnapshotId = eventLog.setSnapshot(fromPageKey, afterUrl, afterScreenshot) ?? undefined;
+    }
+
     eventLog.addPageChangeEvent(result, {
       beforeUrl,
       afterUrl,
       fromPageKey: fromPageKey ?? undefined,
       toPageKey: resolvedPageKey,
+      beforeSnapshotId,
+      afterSnapshotId,
     });
-    if (fromPageKey) {
-      eventLog.setSnapshot(fromPageKey, beforeUrl, beforeScreenshot);
-    }
-    if (analysis.urlChanged) {
-      const nextKey = resolvedPageKey || afterUrl.replace(/[^a-zA-Z0-9]+/g, '_');
-      eventLog.setSnapshot(nextKey, afterUrl, afterScreenshot);
-    } else if (fromPageKey) {
-      eventLog.setSnapshot(fromPageKey, afterUrl, afterScreenshot);
-    }
 
     report?.log(`[Result] ${analysis.summary}`);
 
-    if (analysis.urlChanged && !matchedPageKey) {
-      report?.log(`[Navigation] URL changed`);
-      eventLog.setCurrent(resolvedPageKey || afterUrl.replace(/[^a-zA-Z0-9]+/g, '_'));
+    if (analysis.urlChanged) {
+      const nextKey = resolvedPageKey || afterUrl.replace(/[^a-zA-Z0-9]+/g, '_');
+      if (matchedPageKey) {
+        report?.log(`[Navigation] URL changed (matched page ${matchedPageKey})`);
+      } else {
+        report?.log(`[Navigation] URL changed`);
+      }
+      eventLog.setCurrent(nextKey);
     }
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
