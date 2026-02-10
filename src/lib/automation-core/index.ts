@@ -3,7 +3,7 @@
  * 
  * Main entry: Manager.run() or runDiscovery()
  * 
- * See explorer/GOALS_AND_MEMORY.md for full design.
+ * See explorer/ARCHITECTURE.md for full design.
  */
 
 // Manager - top-level coordinator
@@ -37,6 +37,14 @@ export {
   runSummarizer,
   type DiscoverySummarizerResult,
 } from './agents/discovery';
+
+// Composer - Phase 2
+export {
+  runComposer,
+  type ComposerContext,
+  type Recipe,
+  type RecipeStep,
+} from './agents/composer';
 
 // Handoff Contracts
 export {

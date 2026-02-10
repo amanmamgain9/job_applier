@@ -1,239 +1,349 @@
-# Page Explorer Architecture
+# Recipe Generation System Architecture
+
+Technical documentation for the task automation system.
+
+---
 
 ## Overview
 
-The explorer uses a **Discovery loop** with automatic visual analysis, guided by explicit goals:
-- **Discovery Agent (step decider)** decides what action to take (click, scroll, done)
-- **Discovery loop** executes the action and **automatically** analyzes what changed
-- **Analyzer** compares before/after screenshots using vision LLM + PageMatch
-- **DiscoverEventLog** stores the event log and current page key
-- **Goals** (from the discovery request) act as a checklist and shape the final output
+The system automates web tasks through two phases:
+
+| Phase | Purpose |
+|-------|---------|
+| 1. Discovery | Learn how to do the task |
+| 2. Recipe Generation | Convert learnings into replayable steps |
 
 ---
 
-## Architecture Diagram
+## Architecture
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│                 DISCOVERY AGENT (DECIDER)                      │
-│  Sees: task, goals, event-log summary, recent events, DOM      │
-│  Tools: explore(action, target, reason), done()                │
-│  Output: goal-by-goal understanding                            │
-└────────────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌────────────────────────────────────────────────────────────────┐
-│                   DISCOVERY LOOP (EXECUTION)                   │
-│  1. Step decider picks action                                   │
-│  2. Capture BEFORE screenshot                                   │
-│  3. Execute action (click/scroll)                               │
-│  4. Capture AFTER screenshot                                    │
-│  5. Run Analyzer + PageMatch                                    │
-│  6. Record analyzer/page-change event in log                    │
-│  7. Repeat                                                      │
-└────────────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌────────────────────────────────────────────────────────────────┐
-│                      ANALYZER (Visual)                          │
-│  1. Receive before/after screenshots                            │
-│  2. Send both images to vision LLM                             │
-│  3. LLM compares and returns 1-2 sentence summary              │
-│  4. Simple, reliable, no DOM parsing                           │
-└────────────────────────────────────────────────────────────────┘
+Manager (coordinates phases)
+    │
+    ├── Manager Memory
+    │     └── task, goals, phase results, recipe
+    │
+    ├── Discovery (Phase 1) ─── runs its own loop
+    │     │
+    │     ├── DiscoverEventLog
+    │     │     ├── events: DiscoveryEvent[]
+    │     │     └── currentPageKey + snapshot store
+    │     │
+    │     ├── Step Decider (per-step decision: explore/done)
+    │     │
+    │     └── Sub-agents:
+    │           ├── Analyzer (visual diff after actions)
+    │           ├── PageMatch (same-page detection)
+    │           └── Summarizer (consolidate observations at finish)
+    │
+    ├── Recipe Generation (Phase 2)
+    │     └── Composer (generates replayable steps)
+    │
+    └── Page (browser interface)
+          └── dom/service (DOM utilities)
 ```
+
+**Flow:**
+1. Manager calls Discovery (passes task, goals)
+2. Discovery runs its exploration loop (many steps, uses its own memory)
+3. Discovery returns `ExplorationResult` to Manager
+4. Manager saves result to memory
+5. Manager calls Composer to generate a recipe
 
 ---
 
-## Key Design Principles
+## Memory Model
 
-### 1. Discovery Agent Only Picks Actions
+Each agent owns its memory and decides what to save.
 
-The Discovery Agent has just TWO tools:
-- `explore(action, target, reason)` - Click or scroll
-- `done(understanding)` - Finish exploration
+### Manager Memory
 
-**Analysis is automatic** - happens after every explore action.
-
-**Goals drive exploration**:
-- Goals come from the discovery request
-- Manager treats goals as a checklist
-- Final understanding is structured goal-by-goal
-
-### 2. Visual Analysis
-
-Instead of complex DOM diffing, we:
-1. Take screenshot BEFORE action
-2. Execute action
-3. Take screenshot AFTER action
-4. Send both to vision LLM: "What changed?"
-
-**Why visual?**
-- Handles any page structure
-- No brittle selectors or regex parsing
-- LLM sees exactly what user sees
-- Works with any framework (React, Ember, Vue, etc.)
-
-### 3. Simple Output
-
-The Analyzer returns:
 ```typescript
-interface DiscoveryAnalyzerResult {
-  summary: string;           // "Details panel appeared with job info"
-  urlChanged: boolean;
-  significantChange: boolean;
+interface ManagerMemory {
+  task: string;
+  goals: string[];
+
+  // Results from phases
+  discoveryResult?: ExplorationResult;
+  recipe?: Recipe;
+
+  // Execution state
+  currentPhase: 'discovery' | 'recipe_generation' | 'done';
 }
 ```
 
-No brittle classifications like `elementType` or `pageType`. Just a description.
+**What Manager saves:**
+- Task and goals (received from user)
+- Results returned by each phase
+- Current phase state
 
 ---
 
-## Visual Analyzer
-
-```
-Before Screenshot ──┐
-                    ├── Send to Vision LLM
-After Screenshot ───┘
-                          │
-                          ▼
-              "Compare these screenshots.
-               What changed after the action?"
-                          │
-                          ▼
-              LLM returns visual description:
-              "Job details panel updated with new position"
-```
-
-**Prompt to LLM:**
-- System: "You analyze what changed on a webpage after a user action."
-- User: Action taken + URL change info + BEFORE image + AFTER image
-- Response: 1-2 sentence description
-
-**Token usage:**
-- Each screenshot: ~1000-2000 tokens (compressed JPEG)
-- Total per analysis: ~3000-5000 tokens
-- Much more reliable than DOM parsing
-
----
-
-## Agents
-
-### 1. Discovery Agent (Step Decider)
-
-**Purpose:** Decide what action to take next.
-
-**Tools:**
-
-| Tool | Description |
-|------|-------------|
-| `explore(action, target?, reason)` | Take action: click, scroll_down, scroll_up |
-| `done(understanding)` | Finish exploration |
-
-**Prompt Context:**
-- Task description
-- Event-log summary
-- Recent event log entries (with analyzer/page-change events)
-- Current DOM (text representation for selector lookup)
-
-### 2. Analyzer
-
-**Purpose:** Understand what changed after an action.
-
-**Input:**
-- Action taken
-- Before/after URLs
-- Before/after screenshots (base64 JPEG)
-
-**Output:**
-- `summary`: Human-readable description
-- `urlChanged`: Boolean
-- `significantChange`: Boolean
-
-### 3. Page Match Agent
-
-**Purpose:** Decide if two page states are the same page key.
-
-**Input:**
-- Before/after URLs
-- Before/after screenshots (base64 JPEG)
-
-**Output:**
-- `isSamePage`: Boolean
-- `reason`: short explanation
-
-### 4. Summarizer Agent
-
-**Purpose:** Compress observations into concise understanding.
-
-**When Called:**
-- At the end of exploration (before `done()`)
-
----
-
-## Discovery State
-
-### Data Structure
+### DiscoverEventLog
 
 ```typescript
+// DiscoverEventLog is the single source of truth for Discovery state
 interface DiscoverEventLog {
-  events: DiscoveryEvent[];          // event log
+  events: DiscoveryEvent[];            // event log (what happened)
   currentPageKey: string | null;
 }
-
-type DiscoveryEvent =
-  | { kind: 'decision'; pageKey: string; timestamp: number; output: HandoffOutput<DiscoveryDecision> }
-  | { kind: 'analyzer'; pageKey: string; timestamp: number; output: HandoffOutput<DiscoveryAnalyzerResult>; meta: { beforeUrl: string; afterUrl: string; beforeScreenshot: string | null; afterScreenshot: string | null } }
-  | { kind: 'page_change'; pageKey: string; timestamp: number; output: HandoffOutput<PageChangeResult>; meta: { beforeUrl: string; afterUrl: string; beforeScreenshot: string | null; afterScreenshot: string | null; fromPageKey?: string; toPageKey?: string } }
-  | { kind: 'summarizer'; pageKey: string; timestamp: number; output: HandoffOutput<DiscoverySummarizerResult> };
 ```
+
+**What Discovery saves:**
+- Event log (decisions, actions, LLM calls, analyzer/summarizer outputs, page_change rollups)
+- Snapshot store (screenshots saved separately; events carry snapshot IDs)
+- Current page key (for tagging events)
+
+**Event kinds (high level):**
+- `llm_call` — every LLM call (step decider, analyzer, page match, page id, summarizer)
+- `page_change` — rollup of post-action analysis (analyzer result + page key resolution)
+- `analyzer` — initial page analysis (baseline)
+- `decision`, `action`, `summarizer` — step control and end-of-run summary
+
+Screenshots are stored separately and referenced by `snapshotId` in event metadata.
 
 ---
 
-## Workflow Example
+## Handoff Contracts
 
-```
-Step 1: Decider → explore(click, "#ember244", "see job details")
-        Discovery Loop → takes BEFORE screenshot
-        Discovery Loop → clicks element
-        Discovery Loop → takes AFTER screenshot
-        Analyzer → sends both to vision LLM
-        LLM → "Job details panel appeared on the right with title and Apply button"
-        PageMatch → decide if this is an existing page key
-        EventLog: page_change → Job details panel appeared on the right...
+Every agent/sub-agent call must include a **goal**. This is the minimum contract.
 
-Step 2: Decider (sees event log) → explore(click, ".apply-btn", "try applying")
-        ...
-
-Step N: Decider → done(understanding)
-```
-
----
-
-## Output Format
+### Contract Structure
 
 ```typescript
-interface ExplorationResult {
-  success: boolean;
-  pageKeys: string[];
-  events: DiscoveryEvent[];
-  finalUnderstanding: string; // goal-by-goal summary
-  error?: string;
+// Input (calling an agent)
+interface HandoffInput<TContext = unknown> {
+  goal: string;                // REQUIRED: what we want to achieve
+  context?: TContext;          // optional: additional context
+}
+
+// Output (agent returns)
+interface HandoffOutput<TResult = unknown> {
+  goalCompleted: boolean;      // REQUIRED: did we achieve the goal?
+  result?: TResult;            // optional: what we produced
+  reason?: string;             // optional: why goal failed (if not completed)
 }
 ```
 
+### Handoffs
+
+| From | To | Goal Example | Returns |
+|------|----|--------------|---------|
+| Manager | Discovery | "Learn how to find job listings" | goalCompleted + ExplorationResult |
+| Manager | Composer | "Generate replayable recipe" | goalCompleted + Recipe |
+| Discovery | Analyzer | "Describe what changed after click" | goalCompleted + summary |
+| Discovery | PageMatch | "Is this the same page?" | goalCompleted + isSamePage |
+| Discovery | Summarizer | "Consolidate observations for page" | goalCompleted + summary |
+
+### Why Goal Only?
+
+- **Not brittle**: Agents can evolve internal logic
+- **Clear intent**: Every call has explicit purpose
+- **Debuggable**: Easy to trace what each step was trying to do
+- **Flexible**: Context can vary, goal stays consistent
+
 ---
 
-## Phases
+## Phase 1: Discovery
 
-### Phase 1 (current): Goal-Driven Discovery
-- Accept task + explicit goals from the discovery request
-- Explore the page to satisfy each goal
-- Output a goal-by-goal understanding
+Discovery is an agent that runs its own exploration loop, coordinating sub-agents to learn how to complete a task.
 
-### Phase 2 (next): Goal Execution
-- Use the discovered selectors and understanding to execute the goals
-- Example: apply filters, open listings, capture apply links
+### Entry Point
+
+Manager calls `runDiscovery()` in `agents/discovery/discovery-agent.ts`.
+
+```typescript
+interface DiscoveryContext {
+  page: Page;
+  goals?: string[];
+  llm: BaseChatModel;
+  apiKey: string;
+  model?: string;
+  report?: ReportService;
+  maxSteps?: number;  // default: 20
+}
+
+const result = await runDiscovery({
+  goal: "Learn how to find job listings",
+  context: discoveryContext
+});
+```
+
+### Discovery Loop (per step)
+
+```
+Step N:
+1. Step Decider chooses explore() or done()
+2. Capture BEFORE screenshot
+3. Execute action (click/scroll)
+4. Capture AFTER screenshot
+5. Analyzer + PageMatch
+6. Record page_change rollup + LLM call events
+```
+
+### Step Decider (internal)
+
+Each step, the Step Decider looks at context and decides: **explore** or **done**.
+
+- Tools: `explore(action, target, reason)` and `done(understanding)`
+- Mode: `FunctionCallingMode.ANY` (must call a tool)
+- Inputs: task, goals, DOM, event-log summary, recent events, click labels, screenshot
+
+### Page Keys and `page_change` Rollups
+
+When URL changes, Discovery resolves the page key:
+1. Page Match Agent compares screenshots vs existing pages
+2. If match: reuse page key; else create new key with LLM id
+3. Record `fromPageKey`/`toPageKey` + snapshot IDs on the page_change rollup and switch current page key
+
+---
+
+## Phase 2: Recipe Generation (Composer)
+
+### Goal
+
+Turn an `ExplorationResult` into a robust, replayable recipe that is already
+program-executable (not human-style prose):
+- Steps are structured actions with selectors and validations
+- LLM produces stable selectors from DOM + screenshots
+- Expected UI changes are explicit checks
+- Apply link capture is part of the step definition
+
+### Inputs
+
+- `ExplorationResult` (events + finalUnderstanding)
+- Event log rollups (`page_change`) and `llm_call` traces
+- Snapshot IDs for before/after inspection
+
+### Outputs
+
+- `Recipe` (linked `Step` chain)
+- Each step includes selector strategy + validation checks
+
+### Composer Pipeline (planned)
+
+1. **Generate structured recipe steps (LLM)**
+   - Input: action + page_change summaries + goal + DOM text + screenshots
+   - Output: executable step objects (action type, selector, expected change)
+2. **Validate selectors (code)**
+   - Replay steps sequentially and validate selectors at their step state
+   - Ensure selector matches at least one element
+   - Reject unstable selectors (e.g., `#ember...`)
+3. **Build step sequence**
+   - navigation → search → refine → select listing → capture apply link
+   - mark repeatable steps (e.g., job card selection)
+4. **Add validation**
+   - expected elements or analyzer summaries
+5. **Attach capture logic**
+   - apply link href or redirect target
+   - include `collectsFor: "apply_links"`
+
+### Step Structure (current)
+
+```typescript
+type Step = {
+  navigate?: string;
+  onThisPage?: string;
+  repeatable?: boolean;
+  patternConfirmed?: boolean;
+  collectsFor?: string;
+  nextStep?: Step;
+}
+```
+
+### Step Structure (planned extension)
+
+```typescript
+type Step = {
+  navigate?: string;
+  onThisPage?: string;              // page assertion
+  action?: {
+    type: 'click' | 'type' | 'scroll' | 'wait';
+    selector: string;
+    text?: string;
+  };
+  selectors?: {
+    primary: string;
+  };
+  expectedChange?: string;          // short description of expected UI change
+  repeatable?: boolean;
+  patternConfirmed?: boolean;
+  collectsFor?: string;             // e.g., "apply_links"
+  nextStep?: Step | null;
+}
+```
+
+### Selector Strategy (robustness)
+
+LLM is instructed to prefer:
+1. `data-testid` / stable attributes
+2. `aria-label` + role
+3. Visible text + role
+4. Semantic tag + label/placeholder
+5. Class selectors only if stable
+
+Selectors matching `#ember...` are rejected during validation.
+
+### Validation (no fallbacks)
+
+Each step should include:
+- Expected element present (assertion)
+- Optional analyzer-style expected summary
+
+No retries or fallback selectors are part of the recipe language.
+If a step fails, recovery is handled by a separate fallback system.
+
+### Recipe Language (v0, minimal and explicit)
+
+We keep step types distinct to avoid confusing LLMs.
+Pagination is handled as normal clicks (no `nextPage` primitive).
+
+Allowed constructs:
+- `action` (click/type/scroll)
+- `wait` (explicit delay or waitFor selector)
+- `extract` (capture structured data)
+- `loop` (`forEach` over items, or `until` condition)
+
+Example primitives:
+```typescript
+type Step = {
+  action?: { type: 'click' | 'type' | 'scroll'; target: TargetDescriptor; text?: string };
+  wait?: { type: 'delay' | 'until'; ms?: number; target?: TargetDescriptor };
+  extract?: { key: string; from: TargetDescriptor; attr?: 'href' | 'text' };
+  loop?: { type: 'forEach' | 'until'; over: TargetDescriptor; maxIterations?: number };
+  expect?: { target: TargetDescriptor; containsText?: string };
+  nextStep?: Step | null;
+}
+```
+
+### Capturing Apply Links
+
+Preferred order:
+1. Read `href` from the Apply button if present
+2. If click triggers navigation, capture the redirect target
+3. Record job id from URL (`currentJobId`) for dedupe
+
+---
+
+## Pattern Confirmation
+
+1. Execute action via Page
+2. Observe via Analyzer
+3. Record event in log (sub-agent outputs + URLs + snapshot IDs)
+4. After 2+ observations of same pattern → `confirmed: true`
+
+Navigation links are reliable for recipe generation.
+
+---
+
+## Exit Conditions
+
+| Condition | Trigger |
+|-----------|---------|
+| Goal achievable | Discovery decides `done()` |
+| Stuck | Discovery can't find relevant actions |
+| Blocked | Needs user input (login, captcha) |
+| Max steps | Safety limit reached (default: 20) |
 
 ---
 
@@ -243,8 +353,8 @@ interface ExplorationResult {
 src/lib/automation-core/
 ├── explorer/
 │   ├── ARCHITECTURE.md          # This document
-│   ├── GOALS_AND_MEMORY.md      # Architecture + memory contract
-│   ├── manager.ts               # Manager (Phase coordinator)
+│   ├── GOALS_AND_MEMORY.md      # Legacy redirect to ARCHITECTURE.md
+│   ├── manager.ts               # Manager (phase coordinator)
 │   └── index.ts                 # Exports
 ├── agents/discovery/
 │   ├── discovery-agent.ts       # Discovery loop + step decider
@@ -263,33 +373,10 @@ src/lib/automation-core/
 
 ---
 
-## Evolution History
+## Summary
 
-| Version | Approach | Issues |
-|---------|----------|--------|
-| v1 | Single agent with all tools | Too complex, poor decisions |
-| v2 | Multiple agents with handoffs | Too many conditionals |
-| v3 | Hash-based DOM diffing | Text format mismatch, 0 elements extracted |
-| v4 (current) | Visual analysis with screenshots | Simple, reliable |
+- **Manager** coordinates phases (Discovery → Composer)
+- **Discovery** runs its own loop and logs every LLM call
+- **Event log** is the source of truth (actions, rollups, snapshots)
+- **Composer** turns discovery signals into a robust, replayable recipe
 
----
-
-## Known Limitations
-
-1. **Screenshot size:**
-   - Each JPEG ~50-100KB base64
-   - ~1000-2000 tokens per image
-   - Acceptable for per-action analysis
-
-2. **Vision LLM latency:**
-   - Each analysis call takes 2-5 seconds
-   - Acceptable given the overall exploration flow
-
-3. **No pattern learning:**
-   - Removed complex pattern/observation system
-   - May revisit if needed for multi-page workflows
-
-4. **Selector lookup:**
-   - Manager still needs DOM text to know available selectors
-   - Visual analysis doesn't help with "what can I click"
-   - DOM text format provides this context

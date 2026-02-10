@@ -10,6 +10,7 @@
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { Page } from '../browser/page';
 import { ExplorationResult, runDiscovery, DiscoveryContext } from '../agents/discovery';
+import { runComposer, type Recipe, type ComposerContext } from '../agents/composer';
 import { ReportService } from '../reporting';
 import { createLogger } from '../utils/logger';
 
@@ -23,7 +24,7 @@ export interface ManagerMemory {
   task: string;
   goals: string[];
   discoveryResult?: ExplorationResult;
-  // recipe?: Recipe;  // Future: Phase 2
+  recipe?: Recipe;
   currentPhase: 'discovery' | 'recipe_generation' | 'done';
 }
 
@@ -39,7 +40,7 @@ export interface ManagerOptions {
 export interface ManagerResult {
   success: boolean;
   discoveryResult: ExplorationResult;
-  // recipe?: Recipe;  // Future: Phase 2
+  recipe?: Recipe;
   error?: string;
 }
 
@@ -104,16 +105,38 @@ export class Manager {
         success: discoveryResult.result?.success,
       });
 
-      // Phase 2: Recipe Generation (not yet implemented)
-      // this.memory.currentPhase = 'recipe_generation';
-      // const recipe = await runComposer({ ... });
-      // this.memory.recipe = recipe;
+      // Phase 2: Recipe Generation
+      this.memory.currentPhase = 'recipe_generation';
+      const composerContext: ComposerContext = {
+        page: this.options.page,
+        apiKey: this.options.apiKey,
+        model: this.options.model,
+        task,
+        goals,
+        exploration: discoveryResult.result!,
+        report: this.options.report,
+      };
+      const recipeResult = await runComposer({
+        goal: 'Generate replayable recipe',
+        context: composerContext,
+      });
+      if (!recipeResult.goalCompleted) {
+        logger.error('Recipe generation failed', { reason: recipeResult.reason });
+        return {
+          success: false,
+          discoveryResult: discoveryResult.result!,
+          recipe: recipeResult.result,
+          error: recipeResult.reason || 'Recipe generation failed',
+        };
+      }
+      this.memory.recipe = recipeResult.result;
 
       this.memory.currentPhase = 'done';
       
       return {
         success: true,
         discoveryResult: discoveryResult.result!,
+        recipe: recipeResult.result,
       };
 
     } catch (error) {

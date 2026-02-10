@@ -20,7 +20,7 @@ export { runPageMatch, type PageMatchContext, type PageMatchResult } from './pag
 export { runSummarizer, type DiscoverySummarizerResult } from './summarizer-agent';
 
 // Memory types
-export { type ExplorationResult } from './memory';
+export { type ExplorationResult, type DiscoveryEvent } from './memory';
 
 // Types
 export { type HandoffInput, type HandoffOutput } from './types/handoff';

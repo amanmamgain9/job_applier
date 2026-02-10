@@ -5,13 +5,14 @@
  * Uses ReportService from automation-core for streaming reports.
  */
 
-import { 
-  BrowserContext, 
-  runDiscovery,
+import {
+  BrowserContext,
+  Manager,
   createChatModel,
   ReportService,
   type ExplorationResult,
   type SessionReport,
+  type Recipe,
 } from '@/lib/automation-core';
 import { createMessage } from '@shared/types/messages';
 
@@ -41,6 +42,7 @@ export interface DiscoveryOptions {
 export interface DiscoveryResult {
   success: boolean;
   exploration?: ExplorationResult;
+  recipe?: Recipe;
   report?: SessionReport;
   error?: string;
 }
@@ -191,44 +193,41 @@ export async function startDiscovery(options: DiscoveryOptions): Promise<Discove
     report.startStep('Exploring page with LLM agents');
     updateState({ currentStep: 3 });
     
-    const discoveryResult = await runDiscovery({
-      goal: task,
-      context: {
+    const manager = new Manager({
       page,
-      goals,
       llm,
       apiKey,
       model: modelName,
       report,
       maxSteps: 25, // Max exploration actions
-      },
     });
-    
-    // Extract exploration result from handoff output
-    const exploration: ExplorationResult = discoveryResult.result || {
+    const managerResult = await manager.run(task, goals || []);
+
+    const exploration: ExplorationResult = managerResult.discoveryResult || {
       success: false,
       pageKeys: [],
       events: [],
       finalUnderstanding: '',
-      error: discoveryResult.reason || 'Discovery failed',
+      error: managerResult.error || 'Discovery failed',
     };
-    
-    report.endStep(discoveryResult.goalCompleted, discoveryResult.reason);
-    
+
+    report.endStep(exploration.success, exploration.error);
+
     console.log('[Discovery] Exploration complete:', {
       pagesFound: exploration.pageKeys.length,
       success: exploration.success,
     });
     
     // Done
-    const finalReport = report.complete(exploration.success, exploration.error);
+    const finalReport = report.complete(managerResult.success, managerResult.error);
     updateState({ status: 'idle', currentStep: MAX_STEPS });
     
     return {
-      success: exploration.success,
+      success: managerResult.success,
       exploration,
+      recipe: managerResult.recipe,
       report: finalReport,
-      error: exploration.error,
+      error: managerResult.error,
     };
     
   } catch (err) {

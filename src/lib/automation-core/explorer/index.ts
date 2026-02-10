@@ -21,3 +21,11 @@ export {
   type HandoffInput,
   type HandoffOutput,
 } from '../agents/discovery';
+
+// Composer (Phase 2)
+export {
+  runComposer,
+  type ComposerContext,
+  type Recipe,
+  type RecipeStep,
+} from '../agents/composer';

@@ -61,6 +61,26 @@ function describeInteraction(tagName: string, attributes: Record<string, string>
   return hints.length > 0 ? ` (${hints.join(', ')})` : '';
 }
 
+function sanitizeAttributeValue(value: string): string {
+  return value.replace(/"/g, '\'');
+}
+
+function truncateAttributeValue(value: string, limit: number): string {
+  const trimmed = value.replace(/\s+/g, ' ').trim();
+  if (trimmed.length <= limit) return trimmed;
+  return `${trimmed.slice(0, limit)}...`;
+}
+
+function formatDataAttributes(attributes: Record<string, string>, limit = 80): string[] {
+  return Object.entries(attributes)
+    .filter(([key, value]) => key.startsWith('data-') && String(value ?? '').trim().length > 0)
+    .map(([key, value]) => {
+      const sanitized = sanitizeAttributeValue(String(value));
+      const truncated = truncateAttributeValue(sanitized, limit);
+      return `${key}="${truncated}"`;
+    });
+}
+
 /**
  * Build a simple CSS selector for an element (used by explorer tools)
  */
@@ -105,6 +125,8 @@ export function buildSelector(node: DOMElementNode): string {
 export interface DomToTextOptions {
   /** Include selector hints for clickable elements (for explorer) */
   includeSelectors?: boolean;
+  /** Include data-* attributes in the DOM text (for composer/LLM) */
+  includeDataAttributes?: boolean;
 }
 
 /**
@@ -140,7 +162,7 @@ export function domTreeToString(
   indent = 0,
   inBoilerplate = false
 ): string {
-  const { includeSelectors = false } = options;
+  const { includeSelectors = false, includeDataAttributes = false } = options;
   
   if (!node) return '';
   
@@ -184,6 +206,14 @@ export function domTreeToString(
     // Add aria-label which often describes purpose
     if (attributes['aria-label']) {
       parts.push(`"${String(attributes['aria-label']).slice(0, 50)}"`);
+    }
+
+    // Include data-* attributes when requested (useful for robust selectors)
+    if (includeDataAttributes) {
+      const dataAttrs = formatDataAttributes(attributes);
+      if (dataAttrs.length > 0) {
+        parts.push(...dataAttrs);
+      }
     }
     
     // For links, show where they go
